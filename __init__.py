@@ -47,6 +47,7 @@ import os
 import re
 import json
 import time
+import shutil
 import logging
 import threading
 from datetime import datetime, timezone
@@ -802,6 +803,123 @@ def _execute_job(job, manager, group, inventory, steps):
 
 
 # ---------------------------------------------------------------------------
+# Auto-update (in-plugin)
+# ---------------------------------------------------------------------------
+# The plugin can check a raw source (default: this repo on GitHub) for a newer
+# version and apply it live — PegaProx's /reload re-imports the module from
+# disk, so no service restart is needed. The host-side maintenance timer
+# (installed by install.sh) does the same unattended AND restores the plugin if
+# a PegaProx upgrade ever wipes the plugins dir (persistence).
+
+UPDATE_FILES = ('__init__.py', 'manifest.json', 'power.html')
+
+_DEFAULT_UPDATE_SETTINGS = {
+    'source': 'https://raw.githubusercontent.com/alfonsokuen/pegaprox-plugin-proxmox-power/main',
+    'auto_apply': False,
+    'check_interval_hours': 24,
+}
+
+
+def _update_settings():
+    cfg = _load_config()
+    s = dict(_DEFAULT_UPDATE_SETTINGS)
+    s.update(cfg.get('updates') or {})
+    return s
+
+
+def version_tuple(v):
+    """Lenient semver -> tuple of ints ('1.2.3' -> (1,2,3)). Non-numeric -> 0."""
+    out = []
+    for part in str(v if v is not None else '0').split('.'):
+        digits = ''.join(ch for ch in part if ch.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out) or (0,)
+
+
+def version_gt(a, b):
+    """True if version a is strictly greater than b."""
+    ta, tb = version_tuple(a), version_tuple(b)
+    n = max(len(ta), len(tb))
+    ta += (0,) * (n - len(ta))
+    tb += (0,) * (n - len(tb))
+    return ta > tb
+
+
+def _local_version():
+    try:
+        with open(os.path.join(PLUGIN_DIR, 'manifest.json')) as f:
+            return json.load(f).get('version', '0')
+    except Exception:
+        return '0'
+
+
+def _fetch_remote_text(source, name, timeout=10):
+    """Fetch <source>/<name> as text. Lazy-imports requests (PegaProx ships it)."""
+    import requests
+    url = f"{source.rstrip('/')}/{name}"
+    r = requests.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+
+def check_update(source=None):
+    """Compare local manifest version against the remote source. Never raises."""
+    source = source or _update_settings()['source']
+    cur = _local_version()
+    try:
+        remote = json.loads(_fetch_remote_text(source, 'manifest.json'))
+        latest = remote.get('version', '0')
+        return {'current': cur, 'latest': latest,
+                'update_available': version_gt(latest, cur), 'source': source}
+    except Exception as e:
+        return {'current': cur, 'latest': None, 'update_available': False,
+                'source': source, 'error': str(e)[:200]}
+
+
+def apply_update(source=None):
+    """Download + validate + atomically install the runtime files.
+
+    Validation is fail-closed: the new manifest must parse, the new __init__.py
+    must byte-compile, and power.html must be non-empty — otherwise nothing is
+    written. Each replaced file is backed up to <file>.bak.
+    """
+    source = source or _update_settings()['source']
+    downloaded = {name: _fetch_remote_text(source, name) for name in UPDATE_FILES}
+
+    new_manifest = json.loads(downloaded['manifest.json'])
+    new_ver = new_manifest.get('version', '0')
+    if not downloaded['power.html'].strip():
+        raise RuntimeError('downloaded power.html is empty')
+
+    import tempfile
+    import py_compile
+    tmp_py = None
+    try:
+        with tempfile.NamedTemporaryFile('w', suffix='.py', delete=False,
+                                         encoding='utf-8') as tf:
+            tf.write(downloaded['__init__.py'])
+            tmp_py = tf.name
+        py_compile.compile(tmp_py, doraise=True)
+    finally:
+        if tmp_py and os.path.exists(tmp_py):
+            os.unlink(tmp_py)
+
+    cur = _local_version()
+    for name, content in downloaded.items():
+        path = os.path.join(PLUGIN_DIR, name)
+        try:
+            if os.path.exists(path):
+                shutil.copy2(path, path + '.bak')
+        except Exception:
+            pass
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(content)
+        os.replace(tmp, path)
+    return {'applied': True, 'from': cur, 'to': new_ver}
+
+
+# ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
 
@@ -1016,6 +1134,30 @@ def execute_handler():
     return jsonify({'job_id': job['id'], 'dry_run': dry_run, 'steps': len(steps)})
 
 
+def update_check_handler():
+    if (err := _require(PERM_VIEW)):
+        return err
+    source = (request.args.get('source')
+              or (request.get_json(silent=True) or {}).get('source') or '').strip() or None
+    return jsonify(check_update(source))
+
+
+def update_apply_handler():
+    if (err := _require(PERM_POWER)):
+        return err
+    body = request.get_json(silent=True) or {}
+    source = (body.get('source') or '').strip() or None
+    try:
+        result = apply_update(source)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'update failed')}), 502
+    log_audit(user=_username(), action='power.plugin_updated',
+              details=f"{result['from']} -> {result['to']}")
+    # Hint the UI to live-reload the plugin via PegaProx's reload route.
+    result['reload_url'] = f'/api/plugins/{PLUGIN_ID}/reload'
+    return jsonify(result)
+
+
 def job_handler():
     if (err := _require(PERM_VIEW)):
         return err
@@ -1057,6 +1199,8 @@ def register(app=None):
         'execute': execute_handler,
         'job': job_handler,
         'jobs': jobs_handler,
+        'update/check': update_check_handler,
+        'update/apply': update_apply_handler,
     }
     for path, handler in routes.items():
         register_plugin_route(PLUGIN_ID, path, handler)

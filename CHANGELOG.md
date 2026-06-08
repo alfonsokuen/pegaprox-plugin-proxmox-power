@@ -3,6 +3,29 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-06-07
+
+### Added — auto-update + persistence
+- **In-plugin auto-update.** New `update/check` and `update/apply` endpoints +
+  an Actualizaciones panel in the UI. `apply` downloads the runtime files from a
+  configurable `source` (default: this repo's raw GitHub), **validates them
+  fail-closed** (manifest parses, `__init__.py` byte-compiles, `power.html`
+  non-empty), backs up the old files and installs atomically, then the UI
+  triggers PegaProx's `/reload` for a **live update with no service restart**.
+  Configurable via the `updates` block in `config.json` (`source`,
+  `auto_apply`, `check_interval_hours`).
+- **Persistence across PegaProx upgrades.** `install.sh` now caches the plugin
+  in `/usr/local/lib/proxmox-power` (outside `$PEGAPROX_DIR`) and installs a
+  `proxmox-power-maintenance` systemd timer that, every 5 min, restores the
+  plugin if a PegaProx upgrade wiped/downgraded it (re-copy + re-enable +
+  restart) and — when `AUTO_UPDATE=true` — refreshes the cache from `source`.
+  `uninstall.sh` removes the timer, cache and config.
+- `version_tuple` / `version_gt` helpers (lenient semver compare).
+
+### Tests
+- 30 → 38 (version compare, check available/none/error, apply validates +
+  rejects broken python / empty html, route wiring includes update endpoints).
+
 ## [1.1.0] - 2026-06-07
 
 ### Added (spec-coverage audit — close gaps vs the operator runbook)

@@ -142,6 +142,17 @@
 
   <!-- CONFIG -->
   <section data-pane="cfg" hidden>
+    <div class="card" style="margin-bottom:16px"><h2>Actualizaciones</h2>
+      <div class="body">
+        <div class="row" style="flex-wrap:wrap">
+          <span class="chip">Versión actual: <b id="curVer">…</b></span>
+          <span class="chip" id="latestChip" hidden>Última: <b id="latestVer">—</b></span>
+          <div class="grow"></div>
+          <button id="checkUpdBtn" class="ghost">Buscar actualización</button>
+          <button id="applyUpdBtn" class="primary" hidden>Actualizar ahora</button>
+        </div>
+        <p class="muted" id="updMsg" style="margin:10px 0 0">El plugin se actualiza solo desde su repositorio (configurable). Al aplicar, se recarga en vivo sin reiniciar PegaProx.</p>
+      </div></div>
     <div class="card"><h2>Configuración de grupos (JSON)</h2>
       <div class="body">
         <p class="muted" style="margin-top:0">Define grupos con <code>members</code> (vmid, order, suborder, depends_on, health). El backend valida orden y ciclos al guardar.</p>
@@ -334,13 +345,40 @@ async function saveCfg(){
   }catch(e){ toast(e.message,'err'); }
 }
 
+// ---- auto-update ----
+async function checkUpdate(){
+  $('#updMsg').textContent='Consultando repositorio…';
+  try{
+    const r=await api('update/check');
+    $('#curVer').textContent=r.current;
+    if(r.error){ $('#updMsg').textContent='No se pudo consultar: '+r.error; $('#latestChip').hidden=true; $('#applyUpdBtn').hidden=true; return; }
+    $('#latestVer').textContent=r.latest; $('#latestChip').hidden=false;
+    if(r.update_available){ $('#applyUpdBtn').hidden=false; $('#updMsg').textContent=`Hay una actualización disponible: ${r.current} → ${r.latest}`; }
+    else { $('#applyUpdBtn').hidden=true; $('#updMsg').textContent='El plugin está al día.'; }
+  }catch(e){ $('#updMsg').textContent=e.message; }
+}
+async function applyUpdate(){
+  if(!window.confirm('¿Aplicar la actualización y recargar el plugin en vivo?'))return;
+  $('#updMsg').textContent='Descargando y validando…';
+  try{
+    const r=await api('update/apply',{method:'POST',body:JSON.stringify({})});
+    $('#updMsg').textContent=`Aplicado ${r.from} → ${r.to}. Recargando plugin…`;
+    // Live-reload via PegaProx's plugin reload route (sibling of our API base).
+    const reloadUrl = r.reload_url || BASE.replace(/\/api$/,'')+'/reload';
+    await fetch(reloadUrl,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).catch(()=>{});
+    toast(`Actualizado a ${r.to}`,'ok');
+    setTimeout(()=>location.reload(),1200);
+  }catch(e){ $('#updMsg').textContent='Falló la actualización: '+e.message; toast(e.message,'err'); }
+}
+
 // ---- wiring ----
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
   b.classList.add('active');
   const t=b.dataset.tab;
   document.querySelectorAll('section[data-pane]').forEach(s=>s.hidden=s.dataset.pane!==t);
-  if(t==='inv')loadInventory(); if(t==='jobs')loadJobs(); if(t==='cfg')loadCfgEditor();
+  if(t==='inv')loadInventory(); if(t==='jobs')loadJobs();
+  if(t==='cfg'){loadCfgEditor(); checkUpdate();}
 });
 $('#clusterSel').onchange=e=>{state.cluster=e.target.value;loadClusters();};
 $('#refreshBtn').onclick=()=>{loadClusters();loadGroups();};
@@ -350,6 +388,8 @@ $('#planStopBtn').onclick=()=>plan('stop');
 $('#execBtn').onclick=execute;
 $('#cfgReload').onclick=loadCfgEditor;
 $('#cfgSave').onclick=saveCfg;
+$('#checkUpdBtn').onclick=checkUpdate;
+$('#applyUpdBtn').onclick=applyUpdate;
 
 (async()=>{ await loadClusters(); await loadGroups(); })();
 </script>

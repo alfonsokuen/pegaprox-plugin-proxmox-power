@@ -14,6 +14,7 @@ def test_register_wires_all_routes(plugin, monkeypatch):
 
     routes = captured.get('proxmox-power', {})
     expected = {'ui', 'clusters', 'inventory', 'config', 'config/save',
-                'preflight', 'plan', 'execute', 'job', 'jobs'}
+                'preflight', 'plan', 'execute', 'job', 'jobs',
+                'update/check', 'update/apply'}
     assert set(routes) == expected
     assert all(callable(h) for h in routes.values())

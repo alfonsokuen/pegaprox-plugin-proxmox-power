@@ -125,6 +125,36 @@ Manual install: copy the plugin dir to `/opt/PegaProx/plugins/proxmox-power/`,
 `echo '{ "groups": [] }' > config.json`, `systemctl restart pegaprox`, then
 enable it from Settings → Plugins (works regardless of DB encryption).
 
+## Auto-update & persistence
+
+**In-plugin update.** The *Configuración → Actualizaciones* panel checks the
+configured `source` for a newer version and applies it **live** (PegaProx's
+`/reload` re-imports the module — no service restart). Downloads are validated
+fail-closed (manifest parses, `__init__.py` compiles, `power.html` non-empty)
+and the previous files are backed up to `*.bak`. Configure in `config.json`:
+
+```jsonc
+"updates": {
+  "source": "https://raw.githubusercontent.com/alfonsokuen/pegaprox-plugin-proxmox-power/main",
+  "auto_apply": false,
+  "check_interval_hours": 24
+}
+```
+
+**Persistence across PegaProx upgrades.** `install.sh` caches the plugin in
+`/usr/local/lib/proxmox-power` (outside `$PEGAPROX_DIR`) and installs the
+`proxmox-power-maintenance` systemd timer. Every 5 minutes it restores the
+plugin if a PegaProx upgrade removed/downgraded it, and — with `AUTO_UPDATE=true`
+— refreshes the cache from `source` (the restore step then rolls it out). Enable
+unattended updates at install time:
+
+```bash
+sudo AUTO_UPDATE=true SOURCE_URL=https://raw.githubusercontent.com/alfonsokuen/pegaprox-plugin-proxmox-power/main bash install.sh
+```
+
+> The update source must be reachable from the PegaProx host. Where outbound DNS
+> is restricted, point `SOURCE_URL` / `updates.source` at a reachable mirror.
+
 ## Develop
 
 ```bash

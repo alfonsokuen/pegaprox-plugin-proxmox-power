@@ -60,6 +60,59 @@ chmod 775 "$DEST" 2>/dev/null || true
 chmod 600 "$DEST/config.json" 2>/dev/null || true
 echo "==> Ownership set to $SVC_USER:$SVC_GROUP"
 
+# --- Persistence + auto-update guard (systemd timer) ------------------------
+# Cache lives OUTSIDE $PEGAPROX_DIR so it survives a PegaProx reinstall. A timer
+# restores the plugin if an upgrade wipes it, and (opt-in) auto-updates it.
+CACHE_DIR="${CACHE_DIR:-/usr/local/lib/proxmox-power}"
+SOURCE_URL="${SOURCE_URL:-https://raw.githubusercontent.com/alfonsokuen/pegaprox-plugin-proxmox-power/main}"
+AUTO_UPDATE="${AUTO_UPDATE:-false}"
+if command -v systemctl >/dev/null 2>&1; then
+  echo "==> Installing persistence/auto-update guard -> $CACHE_DIR"
+  mkdir -p "$CACHE_DIR"
+  for f in __init__.py manifest.json power.html; do cp -f "$SRC/$f" "$CACHE_DIR/$f"; done
+  cp -f "$SRC/pp-maintenance.sh" "$CACHE_DIR/pp-maintenance.sh"
+  chmod +x "$CACHE_DIR/pp-maintenance.sh"
+
+  cat > /etc/proxmox-power.conf <<CONF
+# Proxmox VM Power Control — host maintenance config
+PEGAPROX_DIR=$PEGAPROX_DIR
+CACHE_DIR=$CACHE_DIR
+SVC_USER=$SVC_USER
+SOURCE=$SOURCE_URL
+AUTO_UPDATE=$AUTO_UPDATE
+CONF
+
+  cat > /etc/systemd/system/proxmox-power-maintenance.service <<'UNIT'
+[Unit]
+Description=Proxmox VM Power Control - persistence + auto-update guard
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/proxmox-power/pp-maintenance.sh
+UNIT
+
+  cat > /etc/systemd/system/proxmox-power-maintenance.timer <<'UNIT'
+[Unit]
+Description=Run Proxmox VM Power Control maintenance periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+  systemctl daemon-reload
+  systemctl enable --now proxmox-power-maintenance.timer >/dev/null 2>&1 \
+    && echo "==> Guard timer active (auto_update=$AUTO_UPDATE, source=$SOURCE_URL)" \
+    || echo "!! could not enable proxmox-power-maintenance.timer"
+else
+  echo "!! systemctl not found — skipping persistence guard"
+fi
+
 echo "==> Restarting pegaprox"
 systemctl restart pegaprox || echo "!! restart manually: systemctl restart pegaprox"
 echo "==> Done."
