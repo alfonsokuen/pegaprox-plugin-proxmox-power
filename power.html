@@ -487,8 +487,8 @@ function renderMembers(){
     row.innerHTML=`
       <div class="mtop">
         <label class="fld">VM/CT<select data-f="vmid"><option value="">— elegir —</option>${opts}</select></label>
-        <label class="fld">Orden<input data-f="order" type="number" value="${m.order??''}"></label>
-        <label class="fld">Suborden<input data-f="suborder" type="number" value="${m.suborder??0}"></label>
+        <label class="fld">Orden<input data-f="order" type="number" min="1" step="1" value="${m.order??''}"></label>
+        <label class="fld">Suborden<input data-f="suborder" type="number" min="0" step="1" value="${m.suborder??0}"></label>
         <label class="fld">Health<select data-f="hmode">
           <option value="status" ${m.health?.mode==='status'?'selected':''}>status</option>
           <option value="agent" ${m.health?.mode==='agent'?'selected':''}>agent</option>
@@ -501,8 +501,8 @@ function renderMembers(){
       </div>
       <div class="mdeps"><span class="lbl">Arranca después de:</span>${deps}</div>`;
     row.querySelector('[data-f=vmid]').onchange=e=>{m.vmid=e.target.value?+e.target.value:''; renderMembers();};
-    row.querySelector('[data-f=order]').onchange=e=>m.order=+e.target.value;
-    row.querySelector('[data-f=suborder]').onchange=e=>m.suborder=+e.target.value;
+    row.querySelector('[data-f=order]').onchange=e=>{m.order=Math.max(1,Math.floor(+e.target.value||1));e.target.value=m.order;};
+    row.querySelector('[data-f=suborder]').onchange=e=>{m.suborder=Math.max(0,Math.floor(+e.target.value||0));e.target.value=m.suborder;};
     row.querySelector('[data-f=hmode]').onchange=e=>{m.health=m.health||{};m.health.mode=e.target.value;};
     row.querySelector('[data-f=spol]').onchange=e=>m.storage_policy=e.target.value;
     row.querySelector('[data-rm]').onclick=()=>{edit.members.splice(i,1); if(!edit.members.length)edit.members.push(blankMember()); renderMembers();};
@@ -519,7 +519,7 @@ function gatherGroup(){
   const id=($('#geId').value.trim())||slug(name);
   if(!name||!id) throw new Error('Nombre e ID son obligatorios');
   const members=edit.members.filter(m=>m.vmid).map(m=>{
-    const o={vmid:+m.vmid, order:+m.order||0, suborder:+m.suborder||0,
+    const o={vmid:+m.vmid, order:Math.max(1,Math.floor(+m.order||1)), suborder:Math.max(0,Math.floor(+m.suborder||0)),
       depends_on:(m.depends_on||[]).map(Number),
       health:{mode:(m.health&&m.health.mode)||'status'}, storage_policy:m.storage_policy||'wait'};
     if(m.health&&m.health.delay_sec)o.health.delay_sec=+m.health.delay_sec;
@@ -527,6 +527,14 @@ function gatherGroup(){
     return o;
   });
   if(!members.length) throw new Error('Agrega al menos un miembro con VM/CT');
+  // No duplicate VMs.
+  const ids=members.map(m=>m.vmid); if(new Set(ids).size!==ids.length) throw new Error('Hay VM/CT repetidas en el grupo');
+  // (orden, suborden) must be unique so the boot sequence is unambiguous.
+  // Same order is allowed only with a different suborder.
+  const seen=new Set();
+  for(const m of members){ const k=m.order+'/'+m.suborder;
+    if(seen.has(k)) throw new Error(`Orden duplicado ${m.order}/${m.suborder}: usa un suborden distinto cuando repitas el mismo orden`);
+    seen.add(k); }
   return {id,name,cluster_id:state.cluster,settings:{
     stop_mode:$('#seStopMode').value, step_timeout_sec:+$('#seStep').value,
     poll_interval_sec:+$('#sePoll').value, storage_wait_sec:+$('#seStorage').value,

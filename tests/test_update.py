@@ -89,6 +89,25 @@ def test_apply_update_rejects_broken_python(plugin, monkeypatch, tmp_path):
     assert json.loads((tmp_path / 'manifest.json').read_text())['version'] == '1.0.0'
 
 
+def test_apply_update_refuses_downgrade(plugin, monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin, 'PLUGIN_DIR', str(tmp_path))
+    (tmp_path / 'manifest.json').write_text(json.dumps({'version': '1.5.0'}))
+    (tmp_path / '__init__.py').write_text('# old\n')
+    (tmp_path / 'power.html').write_text('<html>old</html>')
+    files = {'manifest.json': json.dumps({'version': '1.0.0'}),
+             '__init__.py': 'X=1\n', 'power.html': '<html>new</html>'}
+    monkeypatch.setattr(plugin, '_fetch_remote_text',
+                        lambda src, name, timeout=10: files[name])
+    import pytest
+    with pytest.raises(Exception, match='downgrade'):
+        plugin.apply_update('http://x')
+    # nothing overwritten
+    assert json.loads((tmp_path / 'manifest.json').read_text())['version'] == '1.5.0'
+    # ...but forced downgrade is allowed
+    res = plugin.apply_update('http://x', allow_downgrade=True)
+    assert res['to'] == '1.0.0'
+
+
 def test_apply_update_rejects_empty_html(plugin, monkeypatch, tmp_path):
     monkeypatch.setattr(plugin, 'PLUGIN_DIR', str(tmp_path))
     (tmp_path / 'manifest.json').write_text(json.dumps({'version': '1.0.0'}))

@@ -789,6 +789,12 @@ def _stop_guest(manager, step, settings, poll, ha_states):
     if not node:
         return 'failed', f'vmid {vmid} has no node in inventory'
     branch = 'remote' if step['placement'] == 'remote' else 'local'
+    # Spec 1: the node must be reachable to issue the stop. Maintenance does NOT
+    # block a stop (powering down during maintenance is legitimate).
+    ok, err = _wait_node_online(manager, node, ha_states,
+                                settings['host_wait_sec'], poll, ignore_maintenance=True)
+    if not ok:
+        return 'failed', err
     verb = step['stop_mode']  # 'shutdown' | 'stop'
     ok, err = _power(manager, node, vtype, vmid, verb)
     if not ok:
@@ -947,18 +953,24 @@ def check_update(source=None):
                 'source': source, 'error': str(e)[:200]}
 
 
-def apply_update(source=None):
+def apply_update(source=None, allow_downgrade=False):
     """Download + validate + atomically install the runtime files.
 
     Validation is fail-closed: the new manifest must parse, the new __init__.py
     must byte-compile, and power.html must be non-empty — otherwise nothing is
-    written. Each replaced file is backed up to <file>.bak.
+    written. A strictly-older remote version is refused unless ``allow_downgrade``
+    (re-applying the same version is allowed, for repair). Each replaced file is
+    backed up to <file>.bak.
     """
     source = source or _update_settings()['source']
     downloaded = {name: _fetch_remote_text(source, name) for name in UPDATE_FILES}
 
     new_manifest = json.loads(downloaded['manifest.json'])
     new_ver = new_manifest.get('version', '0')
+    cur = _local_version()
+    if not allow_downgrade and version_gt(cur, new_ver):
+        raise RuntimeError(
+            f'refusing downgrade {cur} -> {new_ver} (pass allow_downgrade to force)')
     if not downloaded['power.html'].strip():
         raise RuntimeError('downloaded power.html is empty')
 
@@ -975,7 +987,6 @@ def apply_update(source=None):
         if tmp_py and os.path.exists(tmp_py):
             os.unlink(tmp_py)
 
-    cur = _local_version()
     for name, content in downloaded.items():
         path = os.path.join(PLUGIN_DIR, name)
         try:
@@ -1090,13 +1101,27 @@ def config_save_handler():
     for g in groups:
         if not g.get('id'):
             return jsonify({'error': 'each group needs an id'}), 400
+        seen_vmid, seen_order = set(), set()
         for m in g.get('members', []):
             if 'vmid' not in m:
                 return jsonify({'error': f"group '{g.get('id')}': a member is missing 'vmid'"}), 400
             try:
-                int(m['vmid'])
+                vmid = int(m['vmid'])
             except (TypeError, ValueError):
                 return jsonify({'error': f"group '{g.get('id')}': vmid '{m.get('vmid')}' is not an integer"}), 400
+            if vmid in seen_vmid:
+                return jsonify({'error': f"group '{g.get('id')}': duplicate vmid {vmid}"}), 400
+            seen_vmid.add(vmid)
+            order = m.get('order')
+            sub = m.get('suborder', 0)
+            if isinstance(order, (int, float)) and order < 1:
+                return jsonify({'error': f"group '{g.get('id')}': order for vmid {vmid} must be >= 1"}), 400
+            if isinstance(sub, (int, float)) and sub < 0:
+                return jsonify({'error': f"group '{g.get('id')}': suborder for vmid {vmid} must be >= 0"}), 400
+            key = (order, sub)
+            if order is not None and key in seen_order:
+                return jsonify({'error': f"group '{g.get('id')}': duplicate order/suborder {order}/{sub} (use a distinct suborder)"}), 400
+            seen_order.add(key)
         try:
             topo_order(g.get('members', []))
         except ValueError as e:
@@ -1223,10 +1248,13 @@ def update_apply_handler():
         return err
     body = request.get_json(silent=True) or {}
     source = (body.get('source') or '').strip() or None
+    allow_downgrade = body.get('allow_downgrade') is True
     try:
-        result = apply_update(source)
+        result = apply_update(source, allow_downgrade=allow_downgrade)
     except Exception as e:
-        return jsonify({'error': safe_error(e, 'update failed')}), 502
+        # Apply errors are operator-facing config/network issues (downgrade
+        # refused, empty html, broken py, unreachable source) — surface them.
+        return jsonify({'error': str(e)[:300]}), 502
     log_audit(user=_username(), action='power.plugin_updated',
               details=f"{result['from']} -> {result['to']}")
     # Hint the UI to live-reload the plugin via PegaProx's reload route.

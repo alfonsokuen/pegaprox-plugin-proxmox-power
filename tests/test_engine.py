@@ -32,11 +32,7 @@ class FakeManager:
         self.nodes = nodes or {'pve1': 'online'}
         self.ha = {}          # node -> 'online'|'maintenance'
         self.calls = []
-
-    def _get_idx(self, vmid):
-        return self._idx.setdefault(vmid, 0)
-
-    _idx = {}
+        self._idx = {}        # per-instance status-script cursor (parallel-safe)
 
     def _api_get(self, url):
         self.calls.append(('GET', url))
@@ -66,7 +62,6 @@ def _mk_job(plugin, action='start', dry_run=True):
 
 
 def test_dry_run_simulates_without_power_calls(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager()
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0},
              'members': [{'vmid': 100, 'order': 10}]}
@@ -81,7 +76,6 @@ def test_dry_run_simulates_without_power_calls(plugin):
 
 
 def test_real_start_issues_power_and_waits_healthy(plugin):
-    FakeManager._idx = {}
     # VM reports 'stopped' once, then 'running'.
     mgr = FakeManager(status_script={100: ['stopped', 'running']})
     group = {'id': 'g',
@@ -98,7 +92,6 @@ def test_real_start_issues_power_and_waits_healthy(plugin):
 
 
 def test_real_stop_uses_shutdown_and_waits_stopped(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['running', 'stopped']})
     group = {'id': 'g',
              'settings': {'poll_interval_sec': 0, 'step_timeout_sec': 5,
@@ -113,7 +106,6 @@ def test_real_stop_uses_shutdown_and_waits_stopped(plugin):
 
 
 def test_start_aborts_when_storage_never_activates(plugin):
-    FakeManager._idx = {}
     # iscsi storage stays inactive -> _wait_storage times out -> step fails.
     # Guest reports stopped so the live re-check lets the start proceed to the gate.
     mgr = FakeManager(status_script={100: ['stopped']},
@@ -135,7 +127,6 @@ def test_start_aborts_when_storage_never_activates(plugin):
 
 
 def test_live_recheck_skips_start_if_already_running(plugin):
-    FakeManager._idx = {}
     # Plan was built when the VM was stopped, but it came up since (e.g. a
     # dependency started it). Live re-check must skip the start, not error.
     mgr = FakeManager(status_script={100: ['running']})
@@ -152,7 +143,6 @@ def test_live_recheck_skips_start_if_already_running(plugin):
 
 
 def test_storage_policy_skip_skips_guest(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['stopped']},
                       storage={'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}})
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1},
@@ -170,7 +160,6 @@ def test_storage_policy_skip_skips_guest(plugin):
 
 
 def test_storage_policy_fail_does_not_wait(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['stopped']},
                       storage={'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}})
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1,
@@ -187,7 +176,6 @@ def test_storage_policy_fail_does_not_wait(plugin):
 
 
 def test_node_in_maintenance_blocks_start(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['stopped']})
     mgr.ha = {'pve1': 'maintenance'}
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1},
@@ -202,7 +190,6 @@ def test_node_in_maintenance_blocks_start(plugin):
 
 
 def test_ignore_maintenance_allows_start(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['stopped', 'running']})
     mgr.ha = {'pve1': 'maintenance'}
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1,
@@ -217,7 +204,6 @@ def test_ignore_maintenance_allows_start(plugin):
 
 
 def test_node_offline_blocks_start(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['stopped']}, nodes={'pve1': 'offline'})
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 0},
              'members': [{'vmid': 100, 'order': 10}]}
@@ -230,7 +216,6 @@ def test_node_offline_blocks_start(plugin):
 
 
 def test_start_guards_missing_node(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager(status_script={100: ['stopped']})
     # inventory entry without a node (Proxmox omitted the field)
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1},
@@ -244,8 +229,20 @@ def test_start_guards_missing_node(plugin):
     assert not any(u.endswith('/status/start') for _, u in mgr.calls)
 
 
+def test_stop_fails_when_node_offline(plugin):
+    mgr = FakeManager(status_script={100: ['running']}, nodes={'pve1': 'offline'})
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 0},
+             'members': [{'vmid': 100, 'order': 10}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'running'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'stop')
+    job = _mk_job(plugin, 'stop', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'failed'
+    assert 'not online' in job['steps'][0]['detail']
+    assert not any(u.endswith('/status/shutdown') for _, u in mgr.calls)
+
+
 def test_noop_running_vm_is_skipped(plugin):
-    FakeManager._idx = {}
     mgr = FakeManager()
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0},
              'members': [{'vmid': 100, 'order': 10}]}

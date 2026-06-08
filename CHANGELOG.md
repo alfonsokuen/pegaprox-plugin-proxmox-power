@@ -3,6 +3,36 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-06-07
+
+### Fixed (group form, reported by Carlos)
+- **No negative order/suborder.** Inputs now have `min` and values are clamped
+  (order ≥ 1, suborder ≥ 0) on the client; the backend rejects order < 1 /
+  suborder < 0.
+- **No ambiguous duplicate order.** The (order, suborder) pair must be unique
+  per group — the same `order` is allowed only with a different `suborder`.
+  Enforced client-side (clear message) and in `config/save` (400). Duplicate
+  vmids in a group are also rejected.
+- **`update/apply` surfaces the real error** (e.g. "refusing downgrade …",
+  "downloaded power.html is empty") instead of a generic "update failed".
+- Verified the dependency round-trip end-to-end (create → save → plan shows
+  `↳ dep`; reopen → chip restored active). The earlier "deps not shown" was a
+  group saved without activating the chips, not a bug.
+
+## [1.4.0] - 2026-06-07
+
+### Changed / Hardened (closes the remaining QA-audit P3 findings)
+- **Stop now verifies the node is reachable** (`_wait_node_online`, spec 1)
+  before issuing shutdown/stop; maintenance does NOT block a stop (powering down
+  during maintenance is legitimate). A stop on an offline node now fails with a
+  clear message instead of a generic power error.
+- **`apply_update` refuses a downgrade** (remote version strictly older than the
+  installed one) unless `allow_downgrade: true` is passed; re-applying the same
+  version is still allowed for repair. The UI/endpoint expose the flag.
+- Test fixture `FakeManager._idx` moved to a per-instance attribute
+  (parallel-test safe).
+- Tests 41 → 43 (downgrade refusal + forced; stop-on-offline-node).
+
 ## [1.3.5] - 2026-06-07
 
 ### Hardened (independent QA audit follow-up)
