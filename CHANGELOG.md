@@ -3,6 +3,20 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.4] - 2026-06-07
+
+### Improved
+- **Dependencies are now obvious in the group form** (reported by Carlos: deps
+  weren't being set, so the plan's DEPENDE column was empty). Each member row got
+  a dedicated full-width *"Arranca después de:"* line with clear toggle chips
+  (✓ on / + off) showing the other members by vmid + name — instead of a cramped
+  column that was easy to miss. (Backend dependency handling was already correct;
+  this is purely discoverability.)
+- **The result frame is cleared when switching operation** (reported by Carlos:
+  Pre-flight, Plan and job output used to stack). Pre-flight clears plan + job;
+  Plan clears pre-flight + job; Execute clears pre-flight (keeps the plan and
+  shows the job); selecting another group clears everything.
+
 ## [1.3.3] - 2026-06-07
 
 ### Changed
