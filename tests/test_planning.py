@@ -170,6 +170,20 @@ def test_build_plan_flags_unavailable_storage(plugin):
     assert steps[0]['placement'] == 'remote'
 
 
+def test_build_plan_classifies_via_cluster_def_when_node_status_missing(plugin):
+    # The node has no live status for this storage (e.g. not active yet), but the
+    # cluster-level def says it's a shared NFS -> still classified remote.
+    group = {'id': 'g', 'members': [{'vmid': 100, 'order': 10}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    cfgs = {100: {'scsi0': 'cold-nfs:vm-100-disk-0'}}
+    storage_by_node = {'pve1': {}}                      # no per-node status
+    storage_defs = {'cold-nfs': {'type': 'nfs', 'shared': 1}}
+    steps = plugin.build_plan(group, inv, cfgs, storage_by_node, 'start', storage_defs)
+    assert steps[0]['placement'] == 'remote'           # deduced from cluster def
+    assert steps[0]['storage'][0]['available'] is False  # availability still node-only
+    assert steps[0]['storage_state'] == 'unavailable'
+
+
 def test_build_plan_running_vm_is_noop_on_start(plugin):
     group = {'id': 'g', 'members': [{'vmid': 100, 'order': 10}]}
     inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'running'}}

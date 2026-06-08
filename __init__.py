@@ -301,19 +301,22 @@ def topo_order(members):
     return ordered
 
 
-def build_plan(group, inventory, vm_configs, storage_by_node, action):
+def build_plan(group, inventory, vm_configs, storage_by_node, action, storage_defs=None):
     """Build an ordered, side-effect-free execution plan.
 
     Args:
       group:          a config group dict (members + settings)
       inventory:      {vmid(int): {node, name, type('qemu'|'lxc'), status}}
       vm_configs:     {vmid(int): raw config dict} (for storage + boot settings)
-      storage_by_node:{node: {storage_id: status_entry}}
+      storage_by_node:{node: {storage_id: status_entry}}  (live per-node status)
       action:         'start' | 'stop'
+      storage_defs:   {storage_id: cluster-level def}  (classification fallback
+                      when a storage isn't active/listed on the node yet)
 
     Returns a list of step dicts. For 'stop' the order is reversed so that
     dependents stop before their dependencies.
     """
+    storage_defs = storage_defs or {}
     members = group.get('members', [])
     ordered = topo_order(members)
     if action == 'stop':
@@ -335,9 +338,13 @@ def build_plan(group, inventory, vm_configs, storage_by_node, action):
         placement = 'local'
         node_stores = storage_by_node.get(node, {})
         for sid in sorted(needed):
-            entry = node_stores.get(sid)
-            kind = classify_storage(entry) if entry else 'unknown'
-            avail = storage_available(entry) if entry else False
+            node_entry = node_stores.get(sid)
+            # Classify from the live per-node status if present, else fall back to
+            # the cluster-level storage definition (still has type/shared).
+            cls_entry = node_entry or storage_defs.get(sid)
+            kind = classify_storage(cls_entry) if cls_entry else 'unknown'
+            # Availability is only meaningful from the live per-node status.
+            avail = storage_available(node_entry) if node_entry else False
             if kind == 'remote':
                 placement = 'remote'
             if not avail:
@@ -433,6 +440,22 @@ def fetch_storage_for_node(manager, node):
     return {s.get('storage'): s for s in data if s.get('storage')}
 
 
+def fetch_cluster_storage_defs(manager):
+    """Return {storage_id: def} from /storage (datacenter storage.cfg).
+
+    The cluster-level definition carries ``type``/``shared``/``nodes`` even when
+    a storage isn't currently active on a given node, so it's a reliable
+    classification fallback for local-vs-remote.
+    """
+    data = _get_json(manager, '/storage') or []
+    out = {}
+    for s in data:
+        sid = s.get('storage')
+        if sid:
+            out[sid] = s
+    return out
+
+
 def fetch_vm_config(manager, node, vtype, vmid):
     return _get_json(manager, f'/nodes/{node}/{_ep(vtype)}/{vmid}/config') or {}
 
@@ -525,6 +548,7 @@ def run_preflight(manager, group, inventory):
     posture = fetch_cluster_posture(manager)
     nodes = fetch_nodes(manager)
     ha_states = fetch_ha_node_states(manager)
+    storage_defs = fetch_cluster_storage_defs(manager)
 
     checks = []
 
@@ -569,15 +593,18 @@ def run_preflight(manager, group, inventory):
         startup = parse_startup(cfg)
         # 2 / 4 / 6 storage availability + type (NFS/iSCSI/CIFS/NVMe-oF/local)
         for sid in sorted(extract_vm_storages(cfg)):
-            entry = storage_by_node.get(inv['node'], {}).get(sid)
-            ok = storage_available(entry)
-            stype = storage_type_label(entry)
-            placement = classify_storage(entry) if entry else 'unknown'
+            node_entry = storage_by_node.get(inv['node'], {}).get(sid)
+            # Classify from live per-node status, else cluster-level def.
+            cls_entry = node_entry or storage_defs.get(sid)
+            ok = storage_available(node_entry)
+            stype = storage_type_label(cls_entry) if cls_entry else 'unknown'
+            placement = classify_storage(cls_entry) if cls_entry else 'unknown'
+            avail_txt = 'active' if ok else ('INACTIVE' if node_entry else 'no status on node')
             checks.append({
                 'id': f'storage:{vmid}:{sid}', 'ok': ok, 'category': 'storage',
                 'vmid': vmid, 'name': inv.get('name'), 'storage': sid,
                 'stype': stype, 'placement': placement, 'node': inv['node'],
-                'detail': f"{stype} · {placement} · {'active' if ok else 'INACTIVE'}",
+                'detail': f"{stype} · {placement} · {avail_txt}",
             })
         # 3. boot settings (informational, never fails preflight)
         checks.append({
@@ -1092,7 +1119,7 @@ def preflight_handler():
 
 
 def _collect_plan_inputs(manager, group, inv):
-    """Gather configs + per-node storage needed to build a plan."""
+    """Gather configs + per-node storage + cluster storage defs for a plan."""
     vm_configs, nodes_needed = {}, set()
     for m in group.get('members', []):
         vmid = int(m['vmid'])
@@ -1101,7 +1128,8 @@ def _collect_plan_inputs(manager, group, inv):
             nodes_needed.add(n['node'])
             vm_configs[vmid] = fetch_vm_config(manager, n['node'], n['type'], vmid)
     storage_by_node = {n: fetch_storage_for_node(manager, n) for n in nodes_needed}
-    return vm_configs, storage_by_node
+    storage_defs = fetch_cluster_storage_defs(manager)
+    return vm_configs, storage_by_node, storage_defs
 
 
 def plan_handler():
@@ -1119,8 +1147,8 @@ def plan_handler():
         return err
     try:
         inv = fetch_inventory(manager)
-        vm_configs, storage_by_node = _collect_plan_inputs(manager, group, inv)
-        steps = build_plan(group, inv, vm_configs, storage_by_node, action)
+        vm_configs, storage_by_node, storage_defs = _collect_plan_inputs(manager, group, inv)
+        steps = build_plan(group, inv, vm_configs, storage_by_node, action, storage_defs)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
@@ -1146,8 +1174,8 @@ def execute_handler():
         return err
     try:
         inv = fetch_inventory(manager)
-        vm_configs, storage_by_node = _collect_plan_inputs(manager, group, inv)
-        steps = build_plan(group, inv, vm_configs, storage_by_node, action)
+        vm_configs, storage_by_node, storage_defs = _collect_plan_inputs(manager, group, inv)
+        steps = build_plan(group, inv, vm_configs, storage_by_node, action, storage_defs)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:

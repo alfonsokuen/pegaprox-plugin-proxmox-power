@@ -3,6 +3,19 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-06-07
+
+### Improved — robust local/remote deduction
+- Local-vs-remote classification now falls back to the **cluster-level storage
+  definition** (`/storage`, via `fetch_cluster_storage_defs`) when a storage has
+  no live per-node status yet — so a guest's storage is still correctly deduced
+  as local/remote even if it isn't active/listed on the node at that moment.
+  Availability stays strictly per-node (only the live node status proves a
+  storage is active); pre-flight now shows `no status on node` instead of a
+  misleading INACTIVE when only the cluster def is known.
+- `build_plan` gains an optional `storage_defs` argument; `plan`/`execute`/
+  `preflight` pass the cluster defs through. Tests 39 → 40.
+
 ## [1.3.0] - 2026-06-07
 
 ### Added — visual config builder + clearer storage validation (UX)
