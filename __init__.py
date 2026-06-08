@@ -757,6 +757,8 @@ def _storage_gate(manager, step, settings, poll):
 def _start_guest(manager, step, settings, poll, ha_states):
     """Spec 8: ordered start with local/remote branch (8.1/8.2)."""
     node, vtype, vmid = step['node'], step['type'], step['vmid']
+    if not node:
+        return 'failed', f'vmid {vmid} has no node in inventory'
     branch = 'remote' if step['placement'] == 'remote' else 'local'
     # 1/1.1 host availability + maintenance (loop)
     ok, err = _wait_node_online(manager, node, ha_states,
@@ -784,6 +786,8 @@ def _start_guest(manager, step, settings, poll, ha_states):
 def _stop_guest(manager, step, settings, poll, ha_states):
     """Spec 9: ordered stop (reverse) with local/remote branch (9.1/9.2)."""
     node, vtype, vmid = step['node'], step['type'], step['vmid']
+    if not node:
+        return 'failed', f'vmid {vmid} has no node in inventory'
     branch = 'remote' if step['placement'] == 'remote' else 'local'
     verb = step['stop_mode']  # 'shutdown' | 'stop'
     ok, err = _power(manager, node, vtype, vmid, verb)
@@ -1025,6 +1029,10 @@ def _resolve_cluster():
 # ---------------------------------------------------------------------------
 
 def serve_ui():
+    # Defense in depth: the catch-all already enforces plugins.view, but the UI
+    # is only useful to users who can read VM state, so gate it on vm.view too.
+    if (err := _require(PERM_VIEW)):
+        return err
     html = os.path.join(PLUGIN_DIR, 'power.html')
     if os.path.exists(html):
         return send_file(html, mimetype='text/html')

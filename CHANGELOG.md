@@ -3,6 +3,17 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.5] - 2026-06-07
+
+### Hardened (independent QA audit follow-up)
+- `_start_guest` / `_stop_guest` now guard against a member whose inventory
+  record has no `node` (Proxmox omitted the field): the step fails with a clear
+  "vmid X has no node in inventory" instead of building a malformed URL.
+- `serve_ui` now also requires `vm.view` (defense in depth) on top of the
+  catch-all's `plugins.view`.
+- Tests 40 → 41 (node-guard). Independent audit verdict went CONDITIONAL→GO
+  after these two P2 fixes; live E2E 13/13 green.
+
 ## [1.3.4] - 2026-06-07
 
 ### Improved

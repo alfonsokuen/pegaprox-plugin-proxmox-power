@@ -229,6 +229,21 @@ def test_node_offline_blocks_start(plugin):
     assert 'not online' in job['steps'][0]['detail']
 
 
+def test_start_guards_missing_node(plugin):
+    FakeManager._idx = {}
+    mgr = FakeManager(status_script={100: ['stopped']})
+    # inventory entry without a node (Proxmox omitted the field)
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1},
+             'members': [{'vmid': 100, 'order': 10}]}
+    inv = {100: {'node': None, 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'failed'
+    assert 'no node' in job['steps'][0]['detail']
+    assert not any(u.endswith('/status/start') for _, u in mgr.calls)
+
+
 def test_noop_running_vm_is_skipped(plugin):
     FakeManager._idx = {}
     mgr = FakeManager()
