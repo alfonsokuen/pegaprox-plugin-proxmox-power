@@ -164,6 +164,30 @@ def classify_storage(entry):
     return 'remote' if str(entry.get('type', '')).lower() in REMOTE_STORAGE_TYPES else 'local'
 
 
+def storage_type_label(entry):
+    """Human label for a storage backend (NFS / iSCSI / CIFS / NVMe-oF / …).
+
+    NVMe-oF on this fleet surfaces as a *shared* LVM, so lvm+shared is labelled
+    NVMe-oF/Shared-LVM. Used to make the pre-flight storage validation readable.
+    """
+    if not isinstance(entry, dict):
+        return 'unknown'
+    t = str(entry.get('type', '')).lower()
+    shared = entry.get('shared') in (1, True, '1')
+    names = {
+        'nfs': 'NFS', 'cifs': 'CIFS/SMB', 'iscsi': 'iSCSI', 'iscsidirect': 'iSCSI',
+        'pbs': 'PBS', 'glusterfs': 'GlusterFS', 'cephfs': 'CephFS', 'rbd': 'Ceph/RBD',
+        'zfs': 'ZFS-over-iSCSI', 'zfspool': 'ZFS', 'lvmthin': 'LVM-Thin',
+        'lvm': 'LVM', 'dir': 'Directory', 'btrfs': 'Btrfs',
+    }
+    label = names.get(t, t or 'unknown')
+    if t == 'lvm' and shared:
+        label = 'NVMe-oF / Shared-LVM'
+    elif shared and t not in ('nfs', 'cifs', 'iscsi', 'pbs', 'glusterfs', 'cephfs', 'rbd'):
+        label += ' (shared)'
+    return label
+
+
 def storage_available(entry):
     """A storage is usable when it is both enabled and active."""
     if not isinstance(entry, dict):
@@ -507,6 +531,7 @@ def run_preflight(manager, group, inventory):
     # 5. master/standalone posture
     checks.append({
         'id': 'cluster_posture', 'ok': posture.get('quorate', False),
+        'category': 'cluster',
         'detail': f"mode={posture['mode']} quorate={posture.get('quorate')}",
     })
 
@@ -519,13 +544,13 @@ def run_preflight(manager, group, inventory):
         entry = nodes.get(node, {})
         online = entry.get('status') == 'online'
         checks.append({
-            'id': f'node:{node}', 'ok': online,
+            'id': f'node:{node}', 'ok': online, 'category': 'node',
             'detail': f"status={entry.get('status', 'unknown')}",
         })
         # 1.1 maintenance status (HA). ok = not in maintenance.
         maint = node_in_maintenance(ha_states, node)
         checks.append({
-            'id': f'maint:{node}', 'ok': not maint,
+            'id': f'maint:{node}', 'ok': not maint, 'category': 'node',
             'detail': 'in HA maintenance' if maint else 'no maintenance',
         })
 
@@ -536,22 +561,28 @@ def run_preflight(manager, group, inventory):
         vmid = int(m['vmid'])
         if vmid not in inventory:
             missing_members.append(vmid)
-            checks.append({'id': f'vm:{vmid}', 'ok': False, 'detail': 'not found in cluster'})
+            checks.append({'id': f'vm:{vmid}', 'ok': False, 'category': 'storage',
+                           'detail': 'not found in cluster'})
             continue
         inv = inventory[vmid]
         cfg = fetch_vm_config(manager, inv['node'], inv['type'], vmid)
         startup = parse_startup(cfg)
+        # 2 / 4 / 6 storage availability + type (NFS/iSCSI/CIFS/NVMe-oF/local)
         for sid in sorted(extract_vm_storages(cfg)):
             entry = storage_by_node.get(inv['node'], {}).get(sid)
             ok = storage_available(entry)
-            kind = classify_storage(entry) if entry else 'unknown'
+            stype = storage_type_label(entry)
+            placement = classify_storage(entry) if entry else 'unknown'
             checks.append({
-                'id': f'storage:{vmid}:{sid}', 'ok': ok,
-                'detail': f"kind={kind} active={storage_available(entry)}",
+                'id': f'storage:{vmid}:{sid}', 'ok': ok, 'category': 'storage',
+                'vmid': vmid, 'name': inv.get('name'), 'storage': sid,
+                'stype': stype, 'placement': placement, 'node': inv['node'],
+                'detail': f"{stype} · {placement} · {'active' if ok else 'INACTIVE'}",
             })
         # 3. boot settings (informational, never fails preflight)
         checks.append({
-            'id': f'boot:{vmid}', 'ok': True,
+            'id': f'boot:{vmid}', 'ok': True, 'category': 'boot',
+            'vmid': vmid, 'name': inv.get('name'),
             'detail': f"onboot={cfg.get('onboot', 0)} startup_order={startup['order']}",
         })
 

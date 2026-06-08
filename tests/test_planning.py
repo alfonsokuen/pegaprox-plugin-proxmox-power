@@ -19,6 +19,18 @@ def test_classify_storage_by_type(plugin):
     assert plugin.classify_storage({'type': 'lvmthin'}) == 'local'
 
 
+def test_storage_type_label(plugin):
+    assert plugin.storage_type_label({'type': 'nfs'}) == 'NFS'
+    assert plugin.storage_type_label({'type': 'cifs'}) == 'CIFS/SMB'
+    assert plugin.storage_type_label({'type': 'iscsi'}) == 'iSCSI'
+    assert plugin.storage_type_label({'type': 'dir'}) == 'Directory'
+    assert plugin.storage_type_label({'type': 'zfspool'}) == 'ZFS'
+    # NVMe-oF on this fleet = shared LVM
+    assert plugin.storage_type_label({'type': 'lvm', 'shared': 1}) == 'NVMe-oF / Shared-LVM'
+    assert plugin.storage_type_label({'type': 'lvmthin'}) == 'LVM-Thin'
+    assert plugin.storage_type_label(None) == 'unknown'
+
+
 def test_storage_available(plugin):
     assert plugin.storage_available({'enabled': 1, 'active': 1}) is True
     assert plugin.storage_available({'enabled': 1, 'active': 0}) is False

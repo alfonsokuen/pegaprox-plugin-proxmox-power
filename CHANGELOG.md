@@ -3,6 +3,26 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-06-07
+
+### Added — visual config builder + clearer storage validation (UX)
+- **Form-based group builder.** The Configuración tab no longer requires hand-
+  written JSON: add a group, pick members from the **real cluster inventory**
+  (dropdown), set order/suborder, toggle dependencies as chips, and choose
+  health mode + storage_policy — all without JSON. Advanced settings collapse
+  behind *Opciones avanzadas*; the raw JSON editor stays available under
+  *Editar JSON (avanzado)* for power users (progressive disclosure).
+  (Removes the missing-comma / misplaced-field class of errors entirely.)
+- **Storage validation is now explicit in pre-flight.** A dedicated
+  *Almacenamiento (NFS / iSCSI / CIFS / NVMe-oF / local)* section shows each
+  guest's backing storage with a human **type label** (`storage_type_label`),
+  local/remote placement and active/inactive state. Pre-flight checks now carry
+  a `category` (cluster / node / storage / boot) and storage checks include
+  `stype` / `placement`, so the UI groups them into readable sections.
+
+### Tests
+- 38 → 39 (`storage_type_label` mapping incl. NVMe-oF = shared LVM).
+
 ## [1.2.0] - 2026-06-07
 
 ### Added — auto-update + persistence
