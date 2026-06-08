@@ -65,7 +65,7 @@ from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
 
 PLUGIN_ID = 'proxmox-power'
-PLUGIN_NAME = 'Proxmox VM Power Control'
+PLUGIN_NAME = 'Powvm Control'
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PLUGIN_DIR, 'config.json')
 log = logging.getLogger(f'plugin.{PLUGIN_ID}')

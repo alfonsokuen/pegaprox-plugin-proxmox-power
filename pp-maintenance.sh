@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Proxmox VM Power Control — host-side maintenance (run by a systemd timer).
+# Powvm Control — host-side maintenance (run by a systemd timer).
 #
 # Does two jobs, idempotently and quietly:
 #   1. PERSISTENCE — if a PegaProx upgrade wiped or downgraded the plugin in

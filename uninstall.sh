@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove the Proxmox VM Power Control plugin from a local PegaProx instance.
+# Remove the Powvm Control plugin from a local PegaProx instance.
 set -euo pipefail
 PLUGIN_ID="proxmox-power"
 PEGAPROX_DIR="${PEGAPROX_DIR:-/opt/PegaProx}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Proxmox VM Power Control plugin into a local PegaProx instance.
+# Install the Powvm Control plugin into a local PegaProx instance.
 # Run as root on the PegaProx host (e.g. LXC 119).
 set -euo pipefail
 
@@ -40,7 +40,7 @@ fi
 if [ "$ENABLED_VIA_DB" -eq 0 ]; then
   echo "!! Could not auto-enable via the DB (it is encrypted or locked — normal)."
   echo "   Files are installed. Enable it from the web UI:"
-  echo "     PegaProx > Settings > Plugins > 'Proxmox VM Power Control' > Enable"
+  echo "     PegaProx > Settings > Plugins > 'Powvm Control' > Enable"
 fi
 
 # Ownership must match the user the pegaprox *service* runs as (it writes
@@ -74,7 +74,7 @@ if command -v systemctl >/dev/null 2>&1; then
   chmod +x "$CACHE_DIR/pp-maintenance.sh"
 
   cat > /etc/proxmox-power.conf <<CONF
-# Proxmox VM Power Control — host maintenance config
+# Powvm Control — host maintenance config
 PEGAPROX_DIR=$PEGAPROX_DIR
 CACHE_DIR=$CACHE_DIR
 SVC_USER=$SVC_USER
@@ -84,7 +84,7 @@ CONF
 
   cat > /etc/systemd/system/proxmox-power-maintenance.service <<'UNIT'
 [Unit]
-Description=Proxmox VM Power Control - persistence + auto-update guard
+Description=Powvm Control - persistence + auto-update guard
 After=network-online.target
 
 [Service]
@@ -94,7 +94,7 @@ UNIT
 
   cat > /etc/systemd/system/proxmox-power-maintenance.timer <<'UNIT'
 [Unit]
-Description=Run Proxmox VM Power Control maintenance periodically
+Description=Run Powvm Control maintenance periodically
 
 [Timer]
 OnBootSec=2min
@@ -117,7 +117,7 @@ echo "==> Restarting pegaprox"
 systemctl restart pegaprox || echo "!! restart manually: systemctl restart pegaprox"
 echo "==> Done."
 if [ "$ENABLED_VIA_DB" -eq 1 ]; then
-  echo "    Open the 'Proxmox VM Power Control' tab in PegaProx."
+  echo "    Open the 'Powvm Control' tab in PegaProx."
 else
-  echo "    Now enable it: PegaProx > Settings > Plugins > 'Proxmox VM Power Control' > Enable."
+  echo "    Now enable it: PegaProx > Settings > Plugins > 'Powvm Control' > Enable."
 fi

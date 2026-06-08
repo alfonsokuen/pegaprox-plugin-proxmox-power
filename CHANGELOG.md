@@ -3,6 +3,14 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.3] - 2026-06-07
+
+### Changed
+- Renamed the display name to **Powvm Control** (manifest, UI header/title,
+  README, installer messages, systemd unit descriptions). The internal
+  `plugin_id` (`proxmox-power`), API routes, install path, cache dir and repo
+  are unchanged, so existing installs keep working without migration.
+
 ## [1.3.2] - 2026-06-07
 
 ### Fixed
