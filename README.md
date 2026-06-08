@@ -80,8 +80,33 @@ See [`config.example.json`](config.example.json). A group:
 }
 ```
 
-Health modes: `agent` (qemu guest-agent ping), `status` (poll until `running`),
-`delay` (fixed wait). `delay_sec` adds a settle delay after the guest is up.
+**Group `settings`:**
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stop_mode` | `shutdown` | `shutdown` (graceful, guest-agent/ACPI) or `stop` (hard) |
+| `step_timeout_sec` | `300` | Max wait for a member to become healthy / stopped |
+| `poll_interval_sec` | `3` | Poll cadence while waiting |
+| `storage_wait_sec` | `120` | Max wait for a storage to become active (policy `wait`) |
+| `host_wait_sec` | `60` | Max wait for the target node to come online (spec 1) |
+| `ignore_maintenance` | `false` | Act even if the node is in HA maintenance (spec 1.1) |
+| `continue_on_error` | `false` | Keep going after a failed step instead of aborting |
+
+**Per-member options:** `vmid` (required), `name`, `order`, `suborder`,
+`depends_on` (list of vmids), `storage_policy`, `health`.
+
+- **`storage_policy`** — what to do if a backing storage isn't active at start:
+  `wait` (default, loop up to `storage_wait_sec`), `fail` (fail the step
+  immediately), `skip` (skip this guest, not a failure).
+- **`health`** — readiness gate after start:
+  - `mode`: `agent` (qemu guest-agent ping), `status` (poll until `running`),
+    `delay` (fixed wait only).
+  - `delay_sec`: extra settle delay after the guest is up.
+  - `timeout_sec`: per-member readiness timeout (falls back to
+    `step_timeout_sec`).
+
+All of this is editable from the **Configuración** tab (JSON editor); the
+backend validates ordering and rejects dependency cycles on save.
 
 ## Install
 

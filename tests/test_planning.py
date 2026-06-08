@@ -169,3 +169,17 @@ def test_build_plan_missing_member_marked_absent(plugin):
     group = {'id': 'g', 'members': [{'vmid': 777, 'order': 10}]}
     steps = plugin.build_plan(group, {}, {}, {}, 'start')
     assert steps[0]['present'] is False
+
+
+def test_build_plan_storage_policy_default_and_override(plugin):
+    group = {'id': 'g', 'members': [
+        {'vmid': 100, 'order': 10},                          # default -> wait
+        {'vmid': 101, 'order': 20, 'storage_policy': 'skip'},
+        {'vmid': 102, 'order': 30, 'storage_policy': 'bogus'},  # invalid -> wait
+    ]}
+    inv = {v: {'node': 'pve1', 'name': str(v), 'type': 'qemu', 'status': 'stopped'}
+           for v in (100, 101, 102)}
+    steps = {s['vmid']: s for s in plugin.build_plan(group, inv, {}, {}, 'start')}
+    assert steps[100]['storage_policy'] == 'wait'
+    assert steps[101]['storage_policy'] == 'skip'
+    assert steps[102]['storage_policy'] == 'wait'

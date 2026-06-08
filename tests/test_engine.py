@@ -23,12 +23,14 @@ class FakeManager:
     polls to come up.
     """
 
-    def __init__(self, storage=None, status_script=None):
+    def __init__(self, storage=None, status_script=None, nodes=None):
         self.host = '127.0.0.1'
         self.api_port = 8006
         self.is_connected = True
         self.storage = storage or {}
         self.status_script = status_script or {}
+        self.nodes = nodes or {'pve1': 'online'}
+        self.ha = {}          # node -> 'online'|'maintenance'
         self.calls = []
 
     def _get_idx(self, vmid):
@@ -38,6 +40,10 @@ class FakeManager:
 
     def _api_get(self, url):
         self.calls.append(('GET', url))
+        if url.endswith('/nodes'):
+            return FakeResponse(200, [{'node': n, 'status': s} for n, s in self.nodes.items()])
+        if url.endswith('/manager_status'):
+            return FakeResponse(200, {'manager_status': {'node_status': dict(self.ha)}})
         if '/storage' in url:
             node = url.split('/nodes/')[1].split('/')[0]
             data = [dict(storage=s, **v) for s, v in self.storage.get(node, {}).items()]
@@ -143,6 +149,84 @@ def test_live_recheck_skips_start_if_already_running(plugin):
     assert job['steps'][0]['state'] == 'skipped'
     assert 'already running' in job['steps'][0]['detail']
     assert not any(u.endswith('/status/start') for _, u in mgr.calls)
+
+
+def test_storage_policy_skip_skips_guest(plugin):
+    FakeManager._idx = {}
+    mgr = FakeManager(status_script={100: ['stopped']},
+                      storage={'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}})
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1},
+             'members': [{'vmid': 100, 'order': 10, 'storage_policy': 'skip'}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    cfgs = {100: {'scsi0': 'lun0:vm-100-disk-0'}}
+    storage = {'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}}
+    steps = plugin.build_plan(group, inv, cfgs, storage, 'start')
+    assert steps[0]['storage_policy'] == 'skip'
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'skipped'
+    assert job['status'] == 'done'  # skip is not a failure
+    assert not any(u.endswith('/status/start') for _, u in mgr.calls)
+
+
+def test_storage_policy_fail_does_not_wait(plugin):
+    FakeManager._idx = {}
+    mgr = FakeManager(status_script={100: ['stopped']},
+                      storage={'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}})
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1,
+                                     'storage_wait_sec': 999},
+             'members': [{'vmid': 100, 'order': 10, 'storage_policy': 'fail'}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    cfgs = {100: {'scsi0': 'lun0:vm-100-disk-0'}}
+    storage = {'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}}
+    steps = plugin.build_plan(group, inv, cfgs, storage, 'start')
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)  # must NOT hang on storage_wait_sec
+    assert job['steps'][0]['state'] == 'failed'
+    assert 'storage not active' in job['steps'][0]['detail']
+
+
+def test_node_in_maintenance_blocks_start(plugin):
+    FakeManager._idx = {}
+    mgr = FakeManager(status_script={100: ['stopped']})
+    mgr.ha = {'pve1': 'maintenance'}
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1},
+             'members': [{'vmid': 100, 'order': 10}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'failed'
+    assert 'maintenance' in job['steps'][0]['detail']
+    assert not any(u.endswith('/status/start') for _, u in mgr.calls)
+
+
+def test_ignore_maintenance_allows_start(plugin):
+    FakeManager._idx = {}
+    mgr = FakeManager(status_script={100: ['stopped', 'running']})
+    mgr.ha = {'pve1': 'maintenance'}
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1,
+                                     'step_timeout_sec': 3, 'ignore_maintenance': True},
+             'members': [{'vmid': 100, 'order': 10, 'health': {'mode': 'status'}}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'done'
+    assert any(u.endswith('/status/start') for _, u in mgr.calls)
+
+
+def test_node_offline_blocks_start(plugin):
+    FakeManager._idx = {}
+    mgr = FakeManager(status_script={100: ['stopped']}, nodes={'pve1': 'offline'})
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 0},
+             'members': [{'vmid': 100, 'order': 10}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'failed'
+    assert 'not online' in job['steps'][0]['detail']
 
 
 def test_noop_running_vm_is_skipped(plugin):

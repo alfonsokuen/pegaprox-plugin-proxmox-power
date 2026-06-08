@@ -9,6 +9,8 @@
         "step_timeout_sec": 300,
         "poll_interval_sec": 3,
         "storage_wait_sec": 120,
+        "host_wait_sec": 60,
+        "ignore_maintenance": false,
         "continue_on_error": false
       },
       "members": [
@@ -18,6 +20,7 @@
           "order": 10,
           "suborder": 0,
           "depends_on": [],
+          "storage_policy": "wait",
           "health": { "mode": "status", "delay_sec": 5 },
           "_comment": "iSCSI/NFS gateway — must be up before anything on remote storage"
         },
@@ -26,6 +29,7 @@
           "name": "postgres",
           "order": 20,
           "depends_on": [110],
+          "storage_policy": "wait",
           "health": { "mode": "agent", "timeout_sec": 180 }
         },
         {
@@ -34,7 +38,8 @@
           "order": 30,
           "suborder": 0,
           "depends_on": [100],
-          "health": { "mode": "agent", "delay_sec": 10 }
+          "storage_policy": "fail",
+          "health": { "mode": "agent", "delay_sec": 10, "timeout_sec": 120 }
         },
         {
           "vmid": 102,
@@ -42,6 +47,7 @@
           "order": 30,
           "suborder": 1,
           "depends_on": [100],
+          "storage_policy": "skip",
           "health": { "mode": "status" }
         }
       ]

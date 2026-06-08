@@ -3,6 +3,30 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-06-07
+
+### Added (spec-coverage audit — close gaps vs the operator runbook)
+- **Node availability loop (spec 1).** Before starting a guest the engine waits
+  up to `host_wait_sec` for its node to be `online`, instead of failing on the
+  power call.
+- **HA maintenance check (spec 1.1).** New `fetch_ha_node_states` reads
+  `/cluster/ha/status/manager_status`. Pre-flight reports `maint:<node>`, and a
+  node in HA maintenance blocks start unless `ignore_maintenance` is set.
+- **Explicit local vs remote branch (spec 8.1/8.2/9.1/9.2).** Start/stop now run
+  through `_start_guest`/`_stop_guest` with a placement-aware branch, surfaced in
+  step detail (`running + healthy [remote]`, `stopped [local]`, …).
+- **Per-member `storage_policy`** (`wait` | `fail` | `skip`) — choose whether an
+  inactive backing storage waits, fails the step, or skips the guest.
+- **Per-member `health.timeout_sec`** is now honored (falls back to
+  `step_timeout_sec`).
+- New group settings `host_wait_sec` and `ignore_maintenance`.
+
+### Changed
+- `config.example.json` and README document every group/member option; all are
+  editable from the Configuración tab.
+- Test suite grown to 30 (added maintenance-blocks-start, ignore-maintenance,
+  node-offline, storage_policy skip/fail, storage_policy plan defaults).
+
 ## [1.0.3] - 2026-06-07
 
 ### Fixed (found during live E2E on a real PegaProx)

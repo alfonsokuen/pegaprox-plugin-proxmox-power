@@ -97,8 +97,13 @@ _DEFAULT_GROUP_SETTINGS = {
     'step_timeout_sec': 300,     # max wait for a single member to become healthy
     'poll_interval_sec': 3,      # how often to poll status while waiting
     'storage_wait_sec': 120,     # max wait for a storage to become active
+    'host_wait_sec': 60,         # max wait for the target node to be online (spec 1)
+    'ignore_maintenance': False, # if True, act even when the node is in HA maintenance (spec 1.1)
     'continue_on_error': False,  # abort the run on the first failed step
 }
+
+# Per-member storage policy when a backing storage is not active at start time.
+STORAGE_POLICIES = ('wait', 'fail', 'skip')
 
 
 def _load_config():
@@ -323,6 +328,9 @@ def build_plan(group, inventory, vm_configs, storage_by_node, action):
         else:
             noop = cur_status in ('stopped', 'unknown') and present
 
+        policy = m.get('storage_policy', 'wait')
+        if policy not in STORAGE_POLICIES:
+            policy = 'wait'
         steps.append({
             'vmid': vmid,
             'name': m.get('name') or inv.get('name') or str(vmid),
@@ -339,6 +347,7 @@ def build_plan(group, inventory, vm_configs, storage_by_node, action):
             'startup': parse_startup(cfg),
             'storage': storage_report,
             'storage_state': worst,          # ok | unavailable
+            'storage_policy': policy,        # wait | fail | skip
             'health': m.get('health') or {'mode': 'status'},
             'stop_mode': settings['stop_mode'],
         })
@@ -429,6 +438,35 @@ def fetch_cluster_posture(manager):
     return {'mode': 'standalone', 'quorate': True, 'nodes': node_entries}
 
 
+def fetch_ha_node_states(manager):
+    """Return {node: state_string} from HA manager status (spec 1.1 maintenance).
+
+    Reads /cluster/ha/status/manager_status. ``manager_status.node_status`` maps
+    each node to 'online' | 'maintenance' | 'unknown'; ``lrm_status.<node>.mode``
+    can also be 'maintenance'. Returns {} when the cluster has no HA (single
+    node / non-quorate) — callers treat an absent node as 'online'.
+    """
+    out = {}
+    data = _get_json(manager, '/cluster/ha/status/manager_status')
+    if isinstance(data, dict):
+        ns = (data.get('manager_status') or {}).get('node_status') or {}
+        if isinstance(ns, dict):
+            for n, s in ns.items():
+                out[n] = s
+        lrm = data.get('lrm_status') or {}
+        if isinstance(lrm, dict):
+            for n, info in lrm.items():
+                if isinstance(info, dict) and (
+                        'maintenance' in str(info.get('mode', ''))
+                        or 'maintenance' in str(info.get('state', ''))):
+                    out[n] = 'maintenance'
+    return out
+
+
+def node_in_maintenance(ha_states, node):
+    return 'maintenance' in str(ha_states.get(node, ''))
+
+
 def _agent_ping(manager, node, vmid):
     """Return True if the qemu guest agent answers a ping."""
     try:
@@ -461,6 +499,7 @@ def run_preflight(manager, group, inventory):
     members = group.get('members', [])
     posture = fetch_cluster_posture(manager)
     nodes = fetch_nodes(manager)
+    ha_states = fetch_ha_node_states(manager)
 
     checks = []
 
@@ -474,13 +513,19 @@ def run_preflight(manager, group, inventory):
                            for m in members if int(m['vmid']) in inventory})
     needed_nodes = [n for n in needed_nodes if n]
 
-    # 1 / 1.1 node availability + maintenance
+    # 1. node availability
     for node in needed_nodes:
         entry = nodes.get(node, {})
         online = entry.get('status') == 'online'
         checks.append({
             'id': f'node:{node}', 'ok': online,
             'detail': f"status={entry.get('status', 'unknown')}",
+        })
+        # 1.1 maintenance status (HA). ok = not in maintenance.
+        maint = node_in_maintenance(ha_states, node)
+        checks.append({
+            'id': f'maint:{node}', 'ok': not maint,
+            'detail': 'in HA maintenance' if maint else 'no maintenance',
         })
 
     # 2 / 4 / 6 storage availability + type per member
@@ -605,13 +650,90 @@ def _wait_stopped(manager, node, vtype, vmid, timeout_sec, poll):
         time.sleep(poll)
 
 
+def _wait_node_online(manager, node, ha_states, timeout_sec, poll, ignore_maintenance):
+    """Spec 1 + 1.1: loop until the target node is online; refuse a node in HA
+    maintenance unless the operator opted to ignore it."""
+    if node_in_maintenance(ha_states, node) and not ignore_maintenance:
+        return False, f'node {node} is in HA maintenance'
+    deadline = time.time() + timeout_sec
+    while True:
+        status = fetch_nodes(manager).get(node, {}).get('status')
+        if status == 'online':
+            return True, None
+        if time.time() >= deadline:
+            return False, f'node {node} not online (status={status})'
+        time.sleep(poll)
+
+
+def _storage_gate(manager, step, settings, poll):
+    """Spec 2/6/7: ensure the guest's backing storages are active, honoring the
+    member's storage_policy. Returns (state, detail) where state is
+    'ok' | 'skip' | 'fail'."""
+    stores = [s['storage'] for s in step['storage']]
+    if not stores:
+        return 'ok', None
+    policy = step.get('storage_policy', 'wait')
+    live = fetch_storage_for_node(manager, step['node'])
+    pending = [s for s in stores if not storage_available(live.get(s))]
+    if not pending:
+        return 'ok', None
+    msg = f"storage not active: {', '.join(pending)}"
+    if policy == 'fail':
+        return 'fail', msg
+    if policy == 'skip':
+        return 'skip', msg + ' (policy=skip)'
+    ok, err = _wait_storage(manager, step['node'], stores, settings['storage_wait_sec'], poll)
+    return ('ok', None) if ok else ('fail', err)
+
+
+def _start_guest(manager, step, settings, poll, ha_states):
+    """Spec 8: ordered start with local/remote branch (8.1/8.2)."""
+    node, vtype, vmid = step['node'], step['type'], step['vmid']
+    branch = 'remote' if step['placement'] == 'remote' else 'local'
+    # 1/1.1 host availability + maintenance (loop)
+    ok, err = _wait_node_online(manager, node, ha_states,
+                                settings['host_wait_sec'], poll, settings['ignore_maintenance'])
+    if not ok:
+        return 'failed', err
+    # 2/6/7 storage gate. For local storage the home node is the only option;
+    # for remote/shared storage we still verify it is active on this node.
+    state, err = _storage_gate(manager, step, settings, poll)
+    if state == 'skip':
+        return 'skipped', err
+    if state == 'fail':
+        return 'failed', err
+    # 8.1 local / 8.2 remote — issue the power verb on the assigned node.
+    ok, err = _power(manager, node, vtype, vmid, 'start')
+    if not ok:
+        return 'failed', f'start failed [{branch}]: {err}'
+    timeout = int(step['health'].get('timeout_sec') or settings['step_timeout_sec'])
+    ok, err = _wait_health(manager, node, vtype, vmid, step['health'], timeout, poll)
+    if not ok:
+        return 'failed', err
+    return 'done', f'running + healthy [{branch}]'
+
+
+def _stop_guest(manager, step, settings, poll, ha_states):
+    """Spec 9: ordered stop (reverse) with local/remote branch (9.1/9.2)."""
+    node, vtype, vmid = step['node'], step['type'], step['vmid']
+    branch = 'remote' if step['placement'] == 'remote' else 'local'
+    verb = step['stop_mode']  # 'shutdown' | 'stop'
+    ok, err = _power(manager, node, vtype, vmid, verb)
+    if not ok:
+        return 'failed', f'{verb} failed [{branch}]: {err}'
+    timeout = int(step['health'].get('timeout_sec') or settings['step_timeout_sec'])
+    ok, err = _wait_stopped(manager, node, vtype, vmid, timeout, poll)
+    if not ok:
+        return 'failed', err
+    return 'done', f'stopped [{branch}]'
+
+
 def _execute_job(job, manager, group, inventory, steps):
     settings = _group_settings(group)
     poll = settings['poll_interval_sec']
-    step_timeout = settings['step_timeout_sec']
-    storage_wait = settings['storage_wait_sec']
     dry = job['dry_run']
     action = job['action']
+    ha_states = {} if dry else fetch_ha_node_states(manager)
     failed = False
 
     for step in steps:
@@ -658,33 +780,15 @@ def _execute_job(job, manager, group, inventory, steps):
             continue
 
         try:
-            if action == 'start':
-                # storage gate (loop) — spec steps 2/6/7, local vs remote branch
-                stores = [s['storage'] for s in step['storage']]
-                if stores:
-                    ok, err = _wait_storage(manager, node, stores, storage_wait, poll)
-                    if not ok:
-                        raise RuntimeError(err)
-                ok, err = _power(manager, node, vtype, vmid, 'start')
-                if not ok:
-                    raise RuntimeError(f'start failed: {err}')
-                ok, err = _wait_health(manager, node, vtype, vmid,
-                                       step['health'], step_timeout, poll)
-                if not ok:
-                    raise RuntimeError(err)
-                rec['state'] = 'done'
-                rec['detail'] = 'running + healthy'
-            else:
-                verb = step['stop_mode']  # 'shutdown' | 'stop'
-                ok, err = _power(manager, node, vtype, vmid, verb)
-                if not ok:
-                    raise RuntimeError(f'{verb} failed: {err}')
-                ok, err = _wait_stopped(manager, node, vtype, vmid, step_timeout, poll)
-                if not ok:
-                    raise RuntimeError(err)
-                rec['state'] = 'done'
-                rec['detail'] = 'stopped'
-            _job_log(job, f"{vmid}: {rec['state']} ({rec['detail']})")
+            runner = _start_guest if action == 'start' else _stop_guest
+            st, detail = runner(manager, step, settings, poll, ha_states)
+            rec['state'] = st
+            rec['detail'] = detail
+            _job_log(job, f"{vmid}: {st} ({detail})")
+            if st == 'failed':
+                failed = True
+                if not settings['continue_on_error']:
+                    break
         except Exception as e:
             rec['state'] = 'failed'
             rec['detail'] = str(e)
