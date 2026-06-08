@@ -167,7 +167,14 @@ function toast(msg, kind){const t=$('#toast');t.className='toast show '+(kind||'
   clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3200);}
 
 async function api(path, opts){
-  const r = await fetch(BASE+'/'+path, Object.assign({headers:{'Content-Type':'application/json'}}, opts||{}));
+  opts = opts || {};
+  // PegaProx enforces CSRF on state-changing /api/* calls: a request passes
+  // with X-Requested-With:XMLHttpRequest OR a matching Origin. We send the
+  // header explicitly so POSTs work even behind proxies that strip Origin.
+  const headers = Object.assign(
+    {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'},
+    opts.headers || {});
+  const r = await fetch(BASE+'/'+path, Object.assign({}, opts, {headers, credentials:'same-origin'}));
   const j = await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(j.error || ('HTTP '+r.status) + (j.detail?': '+j.detail:''));
   return j;

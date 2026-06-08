@@ -3,6 +3,25 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-06-07
+
+### Fixed (found during live E2E on a real PegaProx)
+- **Frontend now passes PegaProx CSRF.** State-changing `/api/*` calls require
+  `X-Requested-With: XMLHttpRequest` or a matching Origin; the `api()` fetch
+  wrapper now always sends the header (+ `credentials: same-origin`), so
+  config-save / preflight / plan / execute work instead of returning 403.
+- **install.sh sets the correct owner.** The plugin dir/config must be owned by
+  the user the *pegaprox service* runs as (e.g. `pegaprox`), not the owner of
+  `$PEGAPROX_DIR` (often `root`). Wrong ownership made the service unable to
+  read/write `config.json` (Errno 13 → 500). Installer now derives the owner
+  from `systemctl show -p User`, with sensible fallbacks.
+
+### Verified live
+- Full authenticated E2E against the production IDKMANAGER cluster: login →
+  clusters (friendly names) → inventory (26 guests) → config/save → preflight
+  (NVMe-oF classified remote+active, posture quorate) → ordered plan → dry-run
+  execute job (live re-check skipped already-running guests). No VM mutated.
+
 ## [1.0.2] - 2026-06-07
 
 ### Fixed

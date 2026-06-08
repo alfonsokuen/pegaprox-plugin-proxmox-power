@@ -43,9 +43,22 @@ if [ "$ENABLED_VIA_DB" -eq 0 ]; then
   echo "     PegaProx > Settings > Plugins > 'Proxmox VM Power Control' > Enable"
 fi
 
-# Best-effort ownership match to the rest of the install.
-OWNER="$(stat -c '%U:%G' "$PEGAPROX_DIR" 2>/dev/null || echo root:root)"
-chown -R "$OWNER" "$DEST" 2>/dev/null || true
+# Ownership must match the user the pegaprox *service* runs as (it writes
+# config.json at runtime), NOT the owner of $PEGAPROX_DIR (often root). Prefer
+# the systemd User=, then the owner of an existing plugin / the plugins dir.
+SVC_USER="$(systemctl show -p User --value pegaprox 2>/dev/null)"
+if [ -z "$SVC_USER" ] || [ "$SVC_USER" = "root" ]; then
+  if [ -d "$PLUGINS_DIR/docker_swarm" ]; then
+    SVC_USER="$(stat -c '%U' "$PLUGINS_DIR/docker_swarm")"
+  else
+    SVC_USER="$(stat -c '%U' "$PLUGINS_DIR" 2>/dev/null || echo pegaprox)"
+  fi
+fi
+SVC_GROUP="$(id -gn "$SVC_USER" 2>/dev/null || echo "$SVC_USER")"
+chown -R "$SVC_USER:$SVC_GROUP" "$DEST" 2>/dev/null || true
+chmod 775 "$DEST" 2>/dev/null || true
+chmod 600 "$DEST/config.json" 2>/dev/null || true
+echo "==> Ownership set to $SVC_USER:$SVC_GROUP"
 
 echo "==> Restarting pegaprox"
 systemctl restart pegaprox || echo "!! restart manually: systemctl restart pegaprox"
