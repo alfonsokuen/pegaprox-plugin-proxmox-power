@@ -88,7 +88,17 @@
   .jsoncard{padding:13px 15px}
   .jsoncard > summary{cursor:pointer;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.6px;user-select:none}
   .mcard{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:10px 12px;margin-bottom:8px}
-  .mtop{display:grid;grid-template-columns:1.9fr .7fr .7fr 1fr 1.1fr 36px;gap:8px;align-items:end}
+  .mtop{display:grid;grid-template-columns:2fr .8fr 1.3fr 1.1fr 36px;gap:8px;align-items:end}
+  .madv{margin-top:8px} .madv > summary{cursor:pointer;color:var(--muted);font-size:11.5px;user-select:none}
+  .seqbox{background:#0a0d12;border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px}
+  .seqtitle{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:8px}
+  .seqph{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .seqno{font-weight:700;color:#8ab4f8;min-width:58px}
+  .parbadge{font-size:10.5px;color:#f0b450;border:1px solid #5a4a22;border-radius:10px;padding:1px 7px}
+  .seqitems{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .seqvm{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:12.5px}
+  .seqvm .k{color:var(--muted)} .par{color:#f0b450;font-weight:700;margin:0 2px}
+  .seqarrow{color:var(--muted);margin:3px 0 3px 22px;font-size:11px}
   .mcard .fld{font-size:11px}
   .mcard .rm{align-self:center;height:34px;width:34px;border-color:#5b2626;color:var(--err);background:transparent}
   .mcard .rm:hover{background:#3a1a1a}
@@ -209,15 +219,12 @@
           </div>
         </details>
 
-        <h3 style="margin:18px 0 4px;font-size:13px">Miembros (VM/CT en orden de arranque)</h3>
-        <p class="muted" style="margin:0 0 8px;font-size:11.5px">En cada miembro, marca en <b>"Arranca después de:"</b> de qué otros depende (clic en el chip: <span class="depchip off" style="pointer-events:none">+ ejemplo</span> → <span class="depchip" style="pointer-events:none">✓ ejemplo</span>). O usa los atajos de abajo.</p>
+        <h3 style="margin:18px 0 4px;font-size:13px">Miembros y fases de arranque</h3>
+        <p class="muted" style="margin:0 0 10px;font-size:12px">Pon una <b>Fase</b> a cada VM/CT. <b>Misma fase = arrancan juntas (en paralelo)</b>. Una fase mayor arranca <b>después</b> de que la anterior esté lista. (Apagado = en orden inverso.)</p>
+        <div id="geSequence" class="seqbox"></div>
         <div id="geMembers"></div>
-        <div class="toolbar" style="margin-top:8px;gap:8px">
-          <button id="geAddMember" class="ghost">+ Agregar miembro</button>
-          <div class="grow"></div>
-          <button id="geDepFirst" class="ghost" title="Todos los demás dependen del primer miembro">Todos dependen del 1º</button>
-          <button id="geDepChain" class="ghost" title="Cada miembro depende del anterior, por orden">Encadenar en orden</button>
-          <button id="geDepClear" class="ghost" title="Quitar todas las dependencias">Quitar deps</button>
+        <div class="toolbar" style="margin-top:8px">
+          <button id="geAddMember" class="primary">+ Agregar VM/CT</button>
         </div>
 
         <div class="toolbar" style="margin-top:16px">
@@ -349,6 +356,7 @@ function renderPlan(r){
   if(!r.steps.length){$('#planArea').innerHTML='<div class="empty">Plan vacío.</div>';return;}
   const rows=r.steps.map((s,i)=>`<tr>
     <td class="muted">${i+1}</td>
+    <td><b>Fase ${s.wave??'?'}</b>${s.parallel?' <span class="parbadge">∥</span>':''}</td>
     <td><b>${s.name}</b> <small class="k">#${s.vmid}</small></td>
     <td>${s.type||'?'} · ${s.node||'?'}</td>
     <td><span class="pill ${s.placement}">${s.placement}</span></td>
@@ -356,10 +364,11 @@ function renderPlan(r){
     <td class="${s.storage_state==='ok'?'':'state failed'}">${s.storage_state}</td>
     <td class="muted">${s.noop?'no-op ('+s.current_status+')':s.current_status}</td>
   </tr>`).join('');
+  const waves=new Set(r.steps.map(s=>s.wave)).size;
   $('#planArea').innerHTML=`<div class="row" style="margin-bottom:8px">
       <span class="chip">${r.action==='start'?'▶ START':'⏹ STOP'}</span>
-      <span class="muted">${r.steps.length} pasos · orden ${r.action==='stop'?'inverso':'directo'}</span></div>
-    <table><thead><tr><th>#</th><th>Guest</th><th>Ubicación</th><th>Storage</th><th>Depende</th><th>Estado storage</th><th>Actual</th></tr></thead>
+      <span class="muted">${r.steps.length} VM/CT · ${waves} fase(s) · ${r.action==='stop'?'apagado en orden inverso':'arranque por fases'}</span></div>
+    <table><thead><tr><th>#</th><th>Fase</th><th>Guest</th><th>Ubicación</th><th>Storage</th><th>Depende</th><th>Estado storage</th><th>Actual</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
   state.lastAction=r.action;
 }
@@ -490,8 +499,22 @@ function depChain(){ const ms=edit.members.filter(m=>m.vmid)
   edit.members.forEach(m=>{ if(m.vmid) m.depends_on=prev[m.vmid]||[]; }); renderMembers();
   toast('Encadenado por orden','ok'); }
 function depClear(){ edit.members.forEach(m=>m.depends_on=[]); renderMembers(); toast('Dependencias quitadas',''); }
-function blankMember(){ const nextOrder=(edit.members.reduce((m,x)=>Math.max(m,x.order||0),0)||0)+10;
-  return {vmid:'',order:nextOrder,suborder:0,depends_on:[],health:{mode:'status'},storage_policy:'wait'}; }
+function blankMember(){ const nextPhase=(edit.members.reduce((m,x)=>Math.max(m,x.order||0),0)||0)+1;
+  return {vmid:'',order:nextPhase,suborder:0,depends_on:[],health:{mode:'status'},storage_policy:'wait'}; }
+
+function renderSequence(){
+  const box=$('#geSequence'); if(!box)return;
+  const ms=edit.members.filter(m=>m.vmid);
+  if(!ms.length){ box.innerHTML='<span class="muted">Agrega VM/CT y asígnales una fase para ver la secuencia.</span>'; return; }
+  const phases={}; ms.forEach(m=>{ (phases[m.order]=phases[m.order]||[]).push(m); });
+  const keys=Object.keys(phases).map(Number).sort((a,b)=>a-b);
+  const nm=v=>state.invMap?.[v]?.name||('#'+v);
+  const html=keys.map((k,i)=>{ const list=phases[k]; const par=list.length>1;
+    const items=list.map(m=>`<span class="seqvm">${nm(m.vmid)} <small class="k">#${m.vmid}</small></span>`).join(par?'<span class="par">+</span>':'');
+    return `<div class="seqph"><span class="seqno">Fase ${i+1}</span>${par?'<span class="parbadge">∥ paralelo</span>':''}<div class="seqitems">${items}</div></div>`;
+  }).join('<div class="seqarrow">▼</div>');
+  box.innerHTML=`<div class="seqtitle">Secuencia de arranque</div>${html}`;
+}
 
 function renderMembers(){
   const box=$('#geMembers'); box.innerHTML='';
@@ -501,26 +524,30 @@ function renderMembers(){
     const opts=vms.map(v=>`<option value="${v.vmid}" ${String(m.vmid)===String(v.vmid)?'selected':''}>#${v.vmid} ${v.name||''} (${v.node})</option>`).join('');
     const deps = others.length
       ? others.map(o=>`<button type="button" class="depchip ${(m.depends_on||[]).includes(+o.vmid)?'':'off'}" data-dep="${o.vmid}">#${o.vmid} ${o.name||state.invMap?.[o.vmid]?.name||''}</button>`).join('')
-      : '<span class="muted" style="font-size:11px">añade otros miembros para definir dependencias</span>';
+      : '<span class="muted" style="font-size:11px">añade otras VM/CT para definir dependencias finas</span>';
     const row=el('div','mcard');
     row.innerHTML=`
       <div class="mtop">
         <label class="fld">VM/CT<select data-f="vmid"><option value="">— elegir —</option>${opts}</select></label>
-        <label class="fld">Orden<input data-f="order" type="number" min="1" step="1" value="${m.order??''}"></label>
-        <label class="fld">Suborden<input data-f="suborder" type="number" min="0" step="1" value="${m.suborder??0}"></label>
-        <label class="fld">Health<select data-f="hmode">
-          <option value="status" ${m.health?.mode==='status'?'selected':''}>status</option>
-          <option value="agent" ${m.health?.mode==='agent'?'selected':''}>agent</option>
-          <option value="delay" ${m.health?.mode==='delay'?'selected':''}>delay</option></select></label>
+        <label class="fld">Fase<input data-f="order" type="number" min="1" step="1" value="${m.order??1}"></label>
+        <label class="fld">Esperar a que esté<select data-f="hmode">
+          <option value="status" ${m.health?.mode==='status'?'selected':''}>encendida</option>
+          <option value="agent" ${m.health?.mode==='agent'?'selected':''}>lista (agente)</option>
+          <option value="delay" ${m.health?.mode==='delay'?'selected':''}>espera fija</option></select></label>
         <label class="fld">Si storage caído<select data-f="spol">
           <option value="wait" ${m.storage_policy==='wait'?'selected':''}>esperar</option>
           <option value="fail" ${m.storage_policy==='fail'?'selected':''}>fallar</option>
           <option value="skip" ${m.storage_policy==='skip'?'selected':''}>saltar</option></select></label>
         <button class="rm" title="Quitar" data-rm>✕</button>
       </div>
-      <div class="mdeps"><span class="lbl">Arranca después de:</span>${deps}</div>`;
+      <details class="madv"><summary>Avanzado (suborden, dependencias finas)</summary>
+        <div class="row" style="gap:14px;margin:8px 0;flex-wrap:wrap">
+          <label class="fld" style="max-width:140px">Suborden (dentro de la fase)<input data-f="suborder" type="number" min="0" step="1" value="${m.suborder??0}"></label>
+        </div>
+        <div class="mdeps"><span class="lbl">Arranca después de (extra):</span>${deps}</div>
+      </details>`;
     row.querySelector('[data-f=vmid]').onchange=e=>{m.vmid=e.target.value?+e.target.value:''; renderMembers();};
-    row.querySelector('[data-f=order]').onchange=e=>{m.order=Math.max(1,Math.floor(+e.target.value||1));e.target.value=m.order;};
+    row.querySelector('[data-f=order]').onchange=e=>{m.order=Math.max(1,Math.floor(+e.target.value||1));e.target.value=m.order;renderSequence();};
     row.querySelector('[data-f=suborder]').onchange=e=>{m.suborder=Math.max(0,Math.floor(+e.target.value||0));e.target.value=m.suborder;};
     row.querySelector('[data-f=hmode]').onchange=e=>{m.health=m.health||{};m.health.mode=e.target.value;};
     row.querySelector('[data-f=spol]').onchange=e=>m.storage_policy=e.target.value;
@@ -532,6 +559,7 @@ function renderMembers(){
     });
     box.appendChild(row);
   });
+  renderSequence();
 }
 function gatherGroup(){
   const name=$('#geName').value.trim();
@@ -546,14 +574,8 @@ function gatherGroup(){
     return o;
   });
   if(!members.length) throw new Error('Agrega al menos un miembro con VM/CT');
-  // No duplicate VMs.
+  // No duplicate VMs. (Same Fase across members is fine — they boot in parallel.)
   const ids=members.map(m=>m.vmid); if(new Set(ids).size!==ids.length) throw new Error('Hay VM/CT repetidas en el grupo');
-  // (orden, suborden) must be unique so the boot sequence is unambiguous.
-  // Same order is allowed only with a different suborder.
-  const seen=new Set();
-  for(const m of members){ const k=m.order+'/'+m.suborder;
-    if(seen.has(k)) throw new Error(`Orden duplicado ${m.order}/${m.suborder}: usa un suborden distinto cuando repitas el mismo orden`);
-    seen.add(k); }
   return {id,name,cluster_id:state.cluster,settings:{
     stop_mode:$('#seStopMode').value, step_timeout_sec:+$('#seStep').value,
     poll_interval_sec:+$('#sePoll').value, storage_wait_sec:+$('#seStorage').value,
@@ -638,9 +660,6 @@ $('#checkUpdBtn').onclick=checkUpdate;
 $('#applyUpdBtn').onclick=applyUpdate;
 $('#newGroupBtn').onclick=()=>openEditor(null);
 $('#geAddMember').onclick=()=>{ edit.members.push(blankMember()); renderMembers(); };
-$('#geDepFirst').onclick=depFirst;
-$('#geDepChain').onclick=depChain;
-$('#geDepClear').onclick=depClear;
 $('#geCancel').onclick=closeEditor;
 $('#geSave').onclick=saveGroup;
 

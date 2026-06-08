@@ -242,6 +242,24 @@ def test_stop_fails_when_node_offline(plugin):
     assert not any(u.endswith('/status/shutdown') for _, u in mgr.calls)
 
 
+def test_same_order_members_start_in_parallel(plugin):
+    # Two members in the same phase (order) -> both started in one wave.
+    mgr = FakeManager(status_script={534: ['stopped', 'running'], 535: ['stopped', 'running']})
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0, 'host_wait_sec': 1,
+                                     'step_timeout_sec': 3},
+             'members': [{'vmid': 534, 'order': 2, 'health': {'mode': 'status'}},
+                         {'vmid': 535, 'order': 2, 'health': {'mode': 'status'}}]}
+    inv = {534: {'node': 'pve1', 'name': 'a', 'type': 'qemu', 'status': 'stopped'},
+           535: {'node': 'pve1', 'name': 'b', 'type': 'qemu', 'status': 'stopped'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    assert all(s['wave'] == 1 and s['parallel'] for s in steps)
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['status'] == 'done'
+    assert any(u.endswith('/nodes/pve1/qemu/534/status/start') for _, u in mgr.calls)
+    assert any(u.endswith('/nodes/pve1/qemu/535/status/start') for _, u in mgr.calls)
+
+
 def test_noop_running_vm_is_skipped(plugin):
     mgr = FakeManager()
     group = {'id': 'g', 'settings': {'poll_interval_sec': 0},

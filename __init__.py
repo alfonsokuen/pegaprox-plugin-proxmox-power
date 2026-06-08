@@ -50,6 +50,7 @@ import time
 import shutil
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from flask import request, jsonify, send_file
@@ -363,12 +364,15 @@ def build_plan(group, inventory, vm_configs, storage_by_node, action, storage_de
         policy = m.get('storage_policy', 'wait')
         if policy not in STORAGE_POLICIES:
             policy = 'wait'
+        order_val = m.get('order')
+        phase = order_val if isinstance(order_val, int) else 1_000_000
         steps.append({
             'vmid': vmid,
             'name': m.get('name') or inv.get('name') or str(vmid),
             'node': node,
             'type': vtype,
             'action': action,
+            'phase': phase,                  # = order; same phase => parallel wave
             'placement': placement,          # local | remote (storage-derived)
             'current_status': cur_status,
             'present': present,
@@ -383,7 +387,27 @@ def build_plan(group, inventory, vm_configs, storage_by_node, action, storage_de
             'health': m.get('health') or {'mode': 'status'},
             'stop_mode': settings['stop_mode'],
         })
+    _assign_waves(steps)
     return steps
+
+
+def _assign_waves(steps):
+    """Number consecutive same-phase steps as waves and flag parallel members.
+
+    ``steps`` is already ordered by (order, suborder, vmid) — for 'stop' it's the
+    reversed list, so wave 1 is whatever runs first in that direction. Members
+    sharing a phase run in parallel; waves run sequentially.
+    """
+    from collections import Counter
+    counts = Counter(s['phase'] for s in steps)
+    wave = 0
+    prev = object()
+    for s in steps:
+        if s['phase'] != prev:
+            wave += 1
+            prev = s['phase']
+        s['wave'] = wave
+        s['parallel'] = counts[s['phase']] > 1
 
 
 # ---------------------------------------------------------------------------
@@ -806,74 +830,83 @@ def _stop_guest(manager, step, settings, poll, ha_states):
     return 'done', f'stopped [{branch}]'
 
 
+def _run_step(job, manager, step, rec, settings, poll, ha_states, dry, action):
+    """Run a single member (start/stop) and set its rec state. Never raises."""
+    vmid, node, vtype = step['vmid'], step['node'], step['type']
+    if not step['present']:
+        rec['state'] = 'skipped'; rec['detail'] = 'not found in cluster'
+        _job_log(job, f"{vmid}: skipped (missing)"); return
+    if step['noop']:
+        rec['state'] = 'skipped'; rec['detail'] = f"already {step['current_status']}"
+        _job_log(job, f"{vmid}: skipped (already {step['current_status']})"); return
+    if dry:
+        rec['state'] = 'simulated'
+        verb = 'start' if action == 'start' else step['stop_mode']
+        par = ' [paralelo]' if step.get('parallel') else ''
+        rec['detail'] = (f"fase {step.get('wave')}{par}: would {verb} {vtype}/{vmid} "
+                         f"on {node} [{step['placement']}], then wait "
+                         f"({step['health'].get('mode', 'status')})")
+        _job_log(job, f"{vmid}: {rec['detail']}"); return
+    # Live re-check: a guest may have changed state since the plan was built.
+    live_status = fetch_vm_status(manager, node, vtype, vmid).get('status', 'unknown') if node else 'unknown'
+    if action == 'start' and live_status == 'running':
+        rec['state'] = 'skipped'; rec['detail'] = 'already running (live)'
+        _job_log(job, f"{vmid}: skipped (already running)"); return
+    if action == 'stop' and live_status == 'stopped':
+        rec['state'] = 'skipped'; rec['detail'] = 'already stopped (live)'
+        _job_log(job, f"{vmid}: skipped (already stopped)"); return
+    try:
+        runner = _start_guest if action == 'start' else _stop_guest
+        st, detail = runner(manager, step, settings, poll, ha_states)
+        rec['state'] = st; rec['detail'] = detail
+        _job_log(job, f"{vmid}: {st} ({detail})")
+    except Exception as e:
+        rec['state'] = 'failed'; rec['detail'] = str(e)
+        _job_log(job, f"{vmid}: FAILED {e}")
+
+
 def _execute_job(job, manager, group, inventory, steps):
+    """Execute the plan as sequential phases (waves). Members sharing a phase
+    (same `order`) run in PARALLEL; the next phase starts only after the current
+    one finished (each start health-gated). Stop walks the phases in reverse."""
     settings = _group_settings(group)
     poll = settings['poll_interval_sec']
     dry = job['dry_run']
     action = job['action']
     ha_states = {} if dry else fetch_ha_node_states(manager)
+
+    # Pre-create every rec (ordered) so the UI shows the full plan immediately.
+    recs = []
+    with _jobs_lock:
+        for step in steps:
+            rec = dict(step, state='pending', detail=None, ts=_now_iso())
+            job['steps'].append(rec)
+            recs.append(rec)
+
+    # Group consecutive same-wave steps into parallel batches.
+    waves = []
+    for step, rec in zip(steps, recs):
+        if waves and waves[-1][0] == step.get('wave'):
+            waves[-1][1].append((step, rec))
+        else:
+            waves.append((step.get('wave'), [(step, rec)]))
+
     failed = False
-
-    for step in steps:
-        rec = dict(step)
-        rec['state'] = 'pending'
-        rec['detail'] = None
-        rec['ts'] = _now_iso()
-        job['steps'].append(rec)
-
-        vmid, node, vtype = step['vmid'], step['node'], step['type']
-        if not step['present']:
-            rec['state'] = 'skipped'
-            rec['detail'] = 'not found in cluster'
-            _job_log(job, f"{vmid}: skipped (missing)")
-            continue
-        if step['noop']:
-            rec['state'] = 'skipped'
-            rec['detail'] = f"already {step['current_status']}"
-            _job_log(job, f"{vmid}: skipped (already {step['current_status']})")
-            continue
-
-        if dry:
-            rec['state'] = 'simulated'
-            verb = 'start' if action == 'start' else step['stop_mode']
-            rec['detail'] = (f"would {verb} {vtype}/{vmid} on {node} "
-                             f"[{step['placement']}], then wait "
-                             f"({step['health'].get('mode', 'status')})")
-            _job_log(job, f"{vmid}: {rec['detail']}")
-            continue
-
-        # Live re-check: the plan was built moments ago; a guest may have
-        # changed state since (a dependency's start, a manual action). Make the
-        # step idempotent and race-safe instead of acting on stale plan state.
-        live_status = fetch_vm_status(manager, node, vtype, vmid).get('status', 'unknown')
-        if action == 'start' and live_status == 'running':
-            rec['state'] = 'skipped'
-            rec['detail'] = 'already running (live)'
-            _job_log(job, f"{vmid}: skipped (already running)")
-            continue
-        if action == 'stop' and live_status == 'stopped':
-            rec['state'] = 'skipped'
-            rec['detail'] = 'already stopped (live)'
-            _job_log(job, f"{vmid}: skipped (already stopped)")
-            continue
-
-        try:
-            runner = _start_guest if action == 'start' else _stop_guest
-            st, detail = runner(manager, step, settings, poll, ha_states)
-            rec['state'] = st
-            rec['detail'] = detail
-            _job_log(job, f"{vmid}: {st} ({detail})")
-            if st == 'failed':
-                failed = True
-                if not settings['continue_on_error']:
-                    break
-        except Exception as e:
-            rec['state'] = 'failed'
-            rec['detail'] = str(e)
+    for _wave_no, items in waves:
+        if len(items) == 1:
+            s, r = items[0]
+            _run_step(job, manager, s, r, settings, poll, ha_states, dry, action)
+        else:
+            # parallel phase
+            with ThreadPoolExecutor(max_workers=min(8, len(items))) as ex:
+                futs = [ex.submit(_run_step, job, manager, s, r, settings, poll,
+                                  ha_states, dry, action) for s, r in items]
+                for f in futs:
+                    f.result()  # _run_step swallows its own errors
+        if any(r['state'] == 'failed' for _, r in items):
             failed = True
-            _job_log(job, f"{vmid}: FAILED {e}")
             if not settings['continue_on_error']:
-                break
+                break  # don't launch later phases
 
     job['status'] = 'failed' if failed else 'done'
     job['finished'] = _now_iso()
@@ -1101,7 +1134,7 @@ def config_save_handler():
     for g in groups:
         if not g.get('id'):
             return jsonify({'error': 'each group needs an id'}), 400
-        seen_vmid, seen_order = set(), set()
+        seen_vmid = set()
         for m in g.get('members', []):
             if 'vmid' not in m:
                 return jsonify({'error': f"group '{g.get('id')}': a member is missing 'vmid'"}), 400
@@ -1114,14 +1147,12 @@ def config_save_handler():
             seen_vmid.add(vmid)
             order = m.get('order')
             sub = m.get('suborder', 0)
+            # Same order across members is VALID — it means they boot in parallel
+            # (one phase/wave). Only reject impossible values.
             if isinstance(order, (int, float)) and order < 1:
                 return jsonify({'error': f"group '{g.get('id')}': order for vmid {vmid} must be >= 1"}), 400
             if isinstance(sub, (int, float)) and sub < 0:
                 return jsonify({'error': f"group '{g.get('id')}': suborder for vmid {vmid} must be >= 0"}), 400
-            key = (order, sub)
-            if order is not None and key in seen_order:
-                return jsonify({'error': f"group '{g.get('id')}': duplicate order/suborder {order}/{sub} (use a distinct suborder)"}), 400
-            seen_order.add(key)
         try:
             topo_order(g.get('members', []))
         except ValueError as e:

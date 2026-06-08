@@ -197,6 +197,33 @@ def test_build_plan_missing_member_marked_absent(plugin):
     assert steps[0]['present'] is False
 
 
+def test_build_plan_waves_same_order_is_parallel(plugin):
+    group = {'id': 'g', 'members': [
+        {'vmid': 516, 'order': 1},
+        {'vmid': 534, 'order': 2},
+        {'vmid': 535, 'order': 2},
+        {'vmid': 536, 'order': 2},
+    ]}
+    inv = {v: {'node': 'pve1', 'name': str(v), 'type': 'qemu', 'status': 'stopped'}
+           for v in (516, 534, 535, 536)}
+    steps = {s['vmid']: s for s in plugin.build_plan(group, inv, {}, {}, 'start')}
+    assert steps[516]['wave'] == 1 and steps[516]['parallel'] is False
+    assert steps[534]['wave'] == 2 and steps[534]['parallel'] is True
+    assert steps[535]['wave'] == 2 and steps[535]['parallel'] is True
+    assert steps[536]['wave'] == 2 and steps[536]['parallel'] is True
+
+
+def test_build_plan_stop_reverses_waves(plugin):
+    group = {'id': 'g', 'members': [
+        {'vmid': 516, 'order': 1}, {'vmid': 534, 'order': 2}, {'vmid': 535, 'order': 2}]}
+    inv = {v: {'node': 'pve1', 'name': str(v), 'type': 'qemu', 'status': 'running'}
+           for v in (516, 534, 535)}
+    steps = plugin.build_plan(group, inv, {}, {}, 'stop')
+    # wave 1 on stop = the order-2 parallel pair; wave 2 = 516
+    assert steps[0]['wave'] == 1 and steps[0]['phase'] == 2
+    assert steps[-1]['wave'] == 2 and steps[-1]['vmid'] == 516
+
+
 def test_build_plan_storage_policy_default_and_override(plugin):
     group = {'id': 'g', 'members': [
         {'vmid': 100, 'order': 10},                          # default -> wait

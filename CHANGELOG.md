@@ -3,6 +3,26 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-06-07
+
+### Changed — phase/wave model + much simpler UI (ui-ux-pro-max + effortless-flow)
+- **`order` now means a boot PHASE.** Members sharing the same order boot **in
+  parallel** (one wave); waves run sequentially — the next phase starts only
+  after the previous one is healthy (reverse for stop). This matches the
+  operator's mental model (e.g. storage VM in phase 1, the rest parallel in
+  phase 2) and finally enables parallelism. `_execute_job` runs each wave with a
+  `ThreadPoolExecutor`; `build_plan` tags every step with `phase`/`wave`/`parallel`.
+- **Same order is now valid** (it's how you express parallel) — removed the old
+  "duplicate order" rejection. Duplicate vmids and negative order/suborder are
+  still rejected.
+- **Group editor redesigned to be foolproof:** per member you set a single
+  **Fase** (suborder + fine-grained dependencies moved under *Avanzado*), with a
+  live **"Secuencia de arranque"** preview ("Fase 1: storage → Fase 2 ∥ paralelo:
+  a, b, c") so you see exactly what will happen. Plain-language labels
+  ("Esperar a que esté: encendida/lista").
+- **Plan shows a FASE column** with a `∥` badge for parallel members.
+- Tests 43 → 46 (wave assignment, parallel start, stop reverses waves).
+
 ## [1.4.2] - 2026-06-07
 
 ### Added — make dependencies foolproof (Carlos kept getting an empty DEPENDE)
