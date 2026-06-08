@@ -125,7 +125,19 @@ def main():
     assert P.extract_vm_storages(VM_CONFIGS[110]) == {'TN-NVMeOF-VM'}
     print("\n  ✓ boot/storage settings parsed from real configs")
 
-    print("\nE2E PASSED ✅  (3 guests, NVMe-oF shared storage, cross-node dependency chain)")
+    # --- time estimate (minutes) on the real plan ---------------------------
+    assert all('timing' in s and 'est_min' in s['timing'] for s in start)
+    t = P.plan_timing(start)
+    # 110/120 already running -> 0; only 114 (status health) really starts.
+    assert t['est_sec'] == 25, f"expected 25s typical, got {t['est_sec']}"
+    assert t['est_min'] == round(25 / 60, 1)
+    assert t['max_sec'] >= 305  # bounded by step_timeout (+storage wait)
+    stop_t = P.plan_timing(stop)
+    assert stop_t['est_min'] >= 0 and len(stop_t['phases']) == 3
+    print(f"  ✓ plan timing — START ≈ {t['est_min']} min (máx {t['max_min']} min); "
+          f"STOP ≈ {stop_t['est_min']} min over {len(stop_t['phases'])} phases")
+
+    print("\nE2E PASSED ✅  (3 guests, NVMe-oF shared storage, cross-node dependency chain, time estimate)")
 
 
 if __name__ == '__main__':

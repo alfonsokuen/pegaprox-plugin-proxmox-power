@@ -388,6 +388,10 @@ def build_plan(group, inventory, vm_configs, storage_by_node, action, storage_de
             'stop_mode': settings['stop_mode'],
         })
     _assign_waves(steps)
+    for s in steps:
+        e, mx = estimate_step_seconds(s, settings)
+        s['timing'] = {'est_sec': e, 'max_sec': mx,
+                       'est_min': _minutes(e), 'max_min': _minutes(mx)}
     return steps
 
 
@@ -408,6 +412,95 @@ def _assign_waves(steps):
             prev = s['phase']
         s['wave'] = wave
         s['parallel'] = counts[s['phase']] > 1
+
+
+# ---------------------------------------------------------------------------
+# Time estimation (so the operator can size a maintenance window)
+# ---------------------------------------------------------------------------
+# Rough per-step duration model in *seconds*. Deliberately simple: a typical
+# case to gauge a window, plus a worst-case ceiling derived from the configured
+# timeouts. Phases (same `order`) run in parallel -> a phase costs as long as
+# its slowest member; phases run sequentially -> the run costs the sum.
+
+_EST = {
+    'power': 5,          # issuing the power verb + Proxmox task spin-up
+    'boot_status': 20,   # time to reach 'running' (status health)
+    'boot_agent': 45,    # time to reach guest-agent ping (services up)
+    'shutdown': 30,      # graceful ACPI shutdown
+    'hard_stop': 5,      # hard stop
+}
+
+
+def _minutes(sec):
+    """Seconds -> minutes rounded to one decimal (0 stays 0)."""
+    return round((sec or 0) / 60.0, 1)
+
+
+def estimate_step_seconds(step, settings):
+    """Return (typical_sec, worst_case_sec) for a single step.
+
+    A no-op (already in target state) or absent member costs nothing. Worst case
+    is bounded by the configured step/storage timeouts; the typical case uses a
+    fixed boot/shutdown model so the estimate is deterministic and reviewable.
+    """
+    if not step.get('present') or step.get('noop'):
+        return 0, 0
+    action = step.get('action', 'start')
+    health = step.get('health') or {}
+    mode = health.get('mode', 'status')
+    delay = int(health.get('delay_sec', 0) or 0)
+    step_timeout = int(health.get('timeout_sec') or settings.get('step_timeout_sec', 300))
+    power = _EST['power']
+    if action == 'start':
+        if mode == 'delay':
+            est = mx = power + delay
+        else:
+            boot = _EST['boot_agent'] if mode == 'agent' else _EST['boot_status']
+            est = power + boot + delay
+            mx = power + step_timeout + delay
+        # Worst case only: a stalled backing storage we're configured to wait for.
+        if step.get('storage') and step.get('storage_policy', 'wait') == 'wait':
+            mx += int(settings.get('storage_wait_sec', 120))
+        return est, mx
+    # stop
+    base = _EST['shutdown'] if step.get('stop_mode') == 'shutdown' else _EST['hard_stop']
+    return power + base, power + step_timeout
+
+
+def plan_timing(steps):
+    """Aggregate per-step ``timing`` into per-phase and total estimates.
+
+    Within a phase members run in parallel (cost = slowest); phases run
+    sequentially (cost = sum). Reads each step's precomputed ``timing`` dict.
+    """
+    order, bucket = [], {}
+    for s in steps:
+        w = s.get('wave')
+        if w not in bucket:
+            bucket[w] = []
+            order.append(w)
+        bucket[w].append(s)
+
+    def _t(s):
+        t = s.get('timing') or {}
+        return t.get('est_sec', 0), t.get('max_sec', 0)
+
+    phases, total_est, total_max = [], 0, 0
+    for w in order:
+        members = bucket[w]
+        pest = max((_t(s)[0] for s in members), default=0)
+        pmax = max((_t(s)[1] for s in members), default=0)
+        total_est += pest
+        total_max += pmax
+        phases.append({
+            'wave': w, 'phase': members[0].get('phase'),
+            'count': len(members), 'parallel': len(members) > 1,
+            'est_sec': pest, 'max_sec': pmax,
+            'est_min': _minutes(pest), 'max_min': _minutes(pmax),
+        })
+    return {'phases': phases,
+            'est_sec': total_est, 'max_sec': total_max,
+            'est_min': _minutes(total_est), 'max_min': _minutes(total_max)}
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +771,7 @@ def _new_job(cluster_id, group_id, action, dry_run, username):
             'id': job_id, 'cluster_id': cluster_id, 'group': group_id,
             'action': action, 'dry_run': dry_run, 'user': username,
             'status': 'running', 'started': _now_iso(), 'finished': None,
+            'started_epoch': time.time(), 'elapsed_sec': None, 'elapsed_min': None,
             'steps': [], 'log': [],
         }
         # Trim history
@@ -831,38 +925,50 @@ def _stop_guest(manager, step, settings, poll, ha_states):
 
 
 def _run_step(job, manager, step, rec, settings, poll, ha_states, dry, action):
-    """Run a single member (start/stop) and set its rec state. Never raises."""
+    """Run a single member (start/stop) and set its rec state. Never raises.
+
+    Records the wall-clock spent on the step (``elapsed_sec``/``elapsed_min``) so
+    the UI can show real durations next to the estimate.
+    """
     vmid, node, vtype = step['vmid'], step['node'], step['type']
-    if not step['present']:
-        rec['state'] = 'skipped'; rec['detail'] = 'not found in cluster'
-        _job_log(job, f"{vmid}: skipped (missing)"); return
-    if step['noop']:
-        rec['state'] = 'skipped'; rec['detail'] = f"already {step['current_status']}"
-        _job_log(job, f"{vmid}: skipped (already {step['current_status']})"); return
-    if dry:
-        rec['state'] = 'simulated'
-        verb = 'start' if action == 'start' else step['stop_mode']
-        par = ' [paralelo]' if step.get('parallel') else ''
-        rec['detail'] = (f"fase {step.get('wave')}{par}: would {verb} {vtype}/{vmid} "
-                         f"on {node} [{step['placement']}], then wait "
-                         f"({step['health'].get('mode', 'status')})")
-        _job_log(job, f"{vmid}: {rec['detail']}"); return
-    # Live re-check: a guest may have changed state since the plan was built.
-    live_status = fetch_vm_status(manager, node, vtype, vmid).get('status', 'unknown') if node else 'unknown'
-    if action == 'start' and live_status == 'running':
-        rec['state'] = 'skipped'; rec['detail'] = 'already running (live)'
-        _job_log(job, f"{vmid}: skipped (already running)"); return
-    if action == 'stop' and live_status == 'stopped':
-        rec['state'] = 'skipped'; rec['detail'] = 'already stopped (live)'
-        _job_log(job, f"{vmid}: skipped (already stopped)"); return
+    t0 = time.time()
+    rec['started'] = _now_iso()
     try:
-        runner = _start_guest if action == 'start' else _stop_guest
-        st, detail = runner(manager, step, settings, poll, ha_states)
-        rec['state'] = st; rec['detail'] = detail
-        _job_log(job, f"{vmid}: {st} ({detail})")
-    except Exception as e:
-        rec['state'] = 'failed'; rec['detail'] = str(e)
-        _job_log(job, f"{vmid}: FAILED {e}")
+        if not step['present']:
+            rec['state'] = 'skipped'; rec['detail'] = 'not found in cluster'
+            _job_log(job, f"{vmid}: skipped (missing)"); return
+        if step['noop']:
+            rec['state'] = 'skipped'; rec['detail'] = f"already {step['current_status']}"
+            _job_log(job, f"{vmid}: skipped (already {step['current_status']})"); return
+        if dry:
+            rec['state'] = 'simulated'
+            verb = 'start' if action == 'start' else step['stop_mode']
+            par = ' [paralelo]' if step.get('parallel') else ''
+            eta = (step.get('timing') or {}).get('est_min')
+            eta_txt = f", ~{eta} min" if eta else ''
+            rec['detail'] = (f"fase {step.get('wave')}{par}: would {verb} {vtype}/{vmid} "
+                             f"on {node} [{step['placement']}], then wait "
+                             f"({step['health'].get('mode', 'status')}{eta_txt})")
+            _job_log(job, f"{vmid}: {rec['detail']}"); return
+        # Live re-check: a guest may have changed state since the plan was built.
+        live_status = fetch_vm_status(manager, node, vtype, vmid).get('status', 'unknown') if node else 'unknown'
+        if action == 'start' and live_status == 'running':
+            rec['state'] = 'skipped'; rec['detail'] = 'already running (live)'
+            _job_log(job, f"{vmid}: skipped (already running)"); return
+        if action == 'stop' and live_status == 'stopped':
+            rec['state'] = 'skipped'; rec['detail'] = 'already stopped (live)'
+            _job_log(job, f"{vmid}: skipped (already stopped)"); return
+        try:
+            runner = _start_guest if action == 'start' else _stop_guest
+            st, detail = runner(manager, step, settings, poll, ha_states)
+            rec['state'] = st; rec['detail'] = detail
+            _job_log(job, f"{vmid}: {st} ({detail})")
+        except Exception as e:
+            rec['state'] = 'failed'; rec['detail'] = str(e)
+            _job_log(job, f"{vmid}: FAILED {e}")
+    finally:
+        rec['elapsed_sec'] = round(time.time() - t0, 1)
+        rec['elapsed_min'] = _minutes(rec['elapsed_sec'])
 
 
 def _execute_job(job, manager, group, inventory, steps):
@@ -910,6 +1016,8 @@ def _execute_job(job, manager, group, inventory, steps):
 
     job['status'] = 'failed' if failed else 'done'
     job['finished'] = _now_iso()
+    job['elapsed_sec'] = round(time.time() - job.get('started_epoch', time.time()), 1)
+    job['elapsed_min'] = _minutes(job['elapsed_sec'])
 
 
 # ---------------------------------------------------------------------------
@@ -1227,7 +1335,7 @@ def plan_handler():
     except Exception as e:
         return jsonify({'error': safe_error(e, 'plan failed')}), 500
     return jsonify({'cluster_id': cluster_id, 'group': group['id'],
-                    'action': action, 'steps': steps})
+                    'action': action, 'steps': steps, 'timing': plan_timing(steps)})
 
 
 def execute_handler():
@@ -1263,7 +1371,8 @@ def execute_handler():
         target=_execute_job, args=(job, manager, group, inv, steps),
         daemon=True, name=f'power-{job["id"]}')
     t.start()
-    return jsonify({'job_id': job['id'], 'dry_run': dry_run, 'steps': len(steps)})
+    return jsonify({'job_id': job['id'], 'dry_run': dry_run, 'steps': len(steps),
+                    'timing': plan_timing(steps)})
 
 
 def update_check_handler():
@@ -1312,9 +1421,10 @@ def jobs_handler():
         return err
     with _jobs_lock:
         items = sorted(_jobs.values(), key=lambda j: j['started'], reverse=True)
-        summary = [{k: j[k] for k in
+        summary = [{k: j.get(k) for k in
                     ('id', 'cluster_id', 'group', 'action', 'dry_run',
-                     'status', 'started', 'finished', 'user')} for j in items]
+                     'status', 'started', 'finished', 'user',
+                     'elapsed_sec', 'elapsed_min')} for j in items]
     return jsonify({'jobs': summary})
 
 

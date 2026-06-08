@@ -259,6 +259,20 @@ let state = { cluster:null, groups:[], group:null, jobTimer:null };
 function toast(msg, kind){const t=$('#toast');t.className='toast show '+(kind||'');t.textContent=msg;
   clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3200);}
 
+// Per-step duration model (must mirror the backend _EST) so the editor can show
+// an estimate before saving. Phases run in parallel (slowest member) and run
+// one after another (sum), so the operator can size a maintenance window.
+const EST={power:5,boot_status:20,boot_agent:45,shutdown:30,hard_stop:5};
+function estMemberSec(m,settings,action){
+  const mode=(m.health&&m.health.mode)||'status';
+  const delay=+((m.health&&m.health.delay_sec)||0);
+  if(action==='stop') return EST.power+((settings&&settings.stop_mode==='stop')?EST.hard_stop:EST.shutdown);
+  if(mode==='delay') return EST.power+delay;
+  return EST.power+(mode==='agent'?EST.boot_agent:EST.boot_status)+delay;
+}
+// Seconds -> compact minutes label ("0.4 min", "<0.1 min").
+function fmtMin(sec){ sec=+sec||0; const m=sec/60; return (m>0&&m<0.1?'<0.1':(Math.round(m*10)/10))+' min'; }
+
 async function api(path, opts){
   opts = opts || {};
   // PegaProx enforces CSRF on state-changing /api/* calls: a request passes
@@ -360,15 +374,20 @@ function renderPlan(r){
     <td><b>${s.name}</b> <small class="k">#${s.vmid}</small></td>
     <td>${s.type||'?'} · ${s.node||'?'}</td>
     <td><span class="pill ${s.placement}">${s.placement}</span></td>
+    <td class="muted">${s.timing?('≈ '+fmtMin(s.timing.est_sec)):'—'}</td>
     <td>${s.depends_on.length?('↳ '+s.depends_on.join(', ')):'<span class="muted">—</span>'}</td>
     <td class="${s.storage_state==='ok'?'':'state failed'}">${s.storage_state}</td>
     <td class="muted">${s.noop?'no-op ('+s.current_status+')':s.current_status}</td>
   </tr>`).join('');
   const waves=new Set(r.steps.map(s=>s.wave)).size;
-  $('#planArea').innerHTML=`<div class="row" style="margin-bottom:8px">
+  const t=r.timing||{};
+  const timeChip = t.est_min!=null
+    ? `<span class="chip" title="Estimado típico · máximo según timeouts">⏱ ≈ ${fmtMin(t.est_sec)} <small class="k">(máx ${fmtMin(t.max_sec)})</small></span>` : '';
+  $('#planArea').innerHTML=`<div class="row" style="margin-bottom:8px;flex-wrap:wrap">
       <span class="chip">${r.action==='start'?'▶ START':'⏹ STOP'}</span>
+      ${timeChip}
       <span class="muted">${r.steps.length} VM/CT · ${waves} fase(s) · ${r.action==='stop'?'apagado en orden inverso':'arranque por fases'}</span></div>
-    <table><thead><tr><th>#</th><th>Fase</th><th>Guest</th><th>Ubicación</th><th>Storage</th><th>Depende</th><th>Estado storage</th><th>Actual</th></tr></thead>
+    <table><thead><tr><th>#</th><th>Fase</th><th>Guest</th><th>Ubicación</th><th>≈ Tiempo</th><th>Depende</th><th>Estado storage</th><th>Actual</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
   state.lastAction=r.action;
 }
@@ -403,11 +422,13 @@ function renderJob(j){
   const rows=j.steps.map(s=>`<tr>
     <td><b>${s.name}</b> <small class="k">#${s.vmid}</small></td>
     <td class="state ${s.state}">${s.state}</td>
+    <td class="muted" style="white-space:nowrap">${s.elapsed_sec!=null?(s.elapsed_sec+' s'):'<span class="muted">—</span>'}</td>
     <td class="muted">${s.detail||''}</td></tr>`).join('');
+  const dur = j.elapsed_min!=null ? ` · ⏱ ${fmtMin(j.elapsed_sec)}` : '';
   $('#jobArea').innerHTML=`<div class="card" style="margin-top:14px">
-    <h2>${j.id} · ${j.action} · ${j.dry_run?'dry-run':'REAL'} · <span class="state ${j.status}">${j.status}</span></h2>
+    <h2>${j.id} · ${j.action} · ${j.dry_run?'dry-run':'REAL'} · <span class="state ${j.status}">${j.status}</span>${dur}</h2>
     <div class="body"><div class="bar"><i style="width:${pct}%"></i></div>
-    <table style="margin-top:10px"><tbody>${rows||''}</tbody></table></div></div>`;
+    <table style="margin-top:10px"><thead><tr><th>Guest</th><th>Estado</th><th>Duración</th><th>Detalle</th></tr></thead><tbody>${rows||''}</tbody></table></div></div>`;
 }
 
 // ---- inventory (shared cache for the form builder) ----
@@ -442,8 +463,9 @@ async function loadJobs(){
       <td>${j.id}</td><td>${j.group}</td><td>${j.action}</td>
       <td>${j.dry_run?'dry-run':'REAL'}</td>
       <td class="state ${j.status}">${j.status}</td>
+      <td class="muted">${j.elapsed_min!=null?fmtMin(j.elapsed_sec):'<span class="muted">—</span>'}</td>
       <td class="muted">${j.started}</td><td>${j.user}</td></tr>`).join('');
-    $('#jobsArea').innerHTML=`<table><thead><tr><th>Job</th><th>Grupo</th><th>Acción</th><th>Modo</th><th>Estado</th><th>Inicio</th><th>Usuario</th></tr></thead><tbody>${rows}</tbody></table>`;
+    $('#jobsArea').innerHTML=`<table><thead><tr><th>Job</th><th>Grupo</th><th>Acción</th><th>Modo</th><th>Estado</th><th>Duración</th><th>Inicio</th><th>Usuario</th></tr></thead><tbody>${rows}</tbody></table>`;
   }catch(e){ toast(e.message,'err'); }
 }
 
@@ -509,11 +531,15 @@ function renderSequence(){
   const phases={}; ms.forEach(m=>{ (phases[m.order]=phases[m.order]||[]).push(m); });
   const keys=Object.keys(phases).map(Number).sort((a,b)=>a-b);
   const nm=v=>state.invMap?.[v]?.name||('#'+v);
+  const settings={stop_mode:$('#seStopMode')?.value||'shutdown'};
+  let totalSec=0;
   const html=keys.map((k,i)=>{ const list=phases[k]; const par=list.length>1;
+    const psec=Math.max(...list.map(m=>estMemberSec(m,settings,'start')));
+    totalSec+=psec;
     const items=list.map(m=>`<span class="seqvm">${nm(m.vmid)} <small class="k">#${m.vmid}</small></span>`).join(par?'<span class="par">+</span>':'');
-    return `<div class="seqph"><span class="seqno">Fase ${i+1}</span>${par?'<span class="parbadge">∥ paralelo</span>':''}<div class="seqitems">${items}</div></div>`;
+    return `<div class="seqph"><span class="seqno">Fase ${i+1}</span>${par?'<span class="parbadge">∥ paralelo</span>':''}<div class="seqitems">${items}</div><span class="grow"></span><small class="k">≈ ${fmtMin(psec)}</small></div>`;
   }).join('<div class="seqarrow">▼</div>');
-  box.innerHTML=`<div class="seqtitle">Secuencia de arranque</div>${html}`;
+  box.innerHTML=`<div class="seqtitle">Secuencia de arranque · arranque ≈ ${fmtMin(totalSec)}</div>${html}`;
 }
 
 function renderMembers(){

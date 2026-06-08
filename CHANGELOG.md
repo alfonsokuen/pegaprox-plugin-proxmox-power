@@ -3,6 +3,26 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-06-07
+
+### Added — time estimates + real durations (in minutes)
+- **Plan/sequence time estimate.** Every step now carries a `timing`
+  `{est_sec, max_sec, est_min, max_min}` and the `plan`/`execute` responses
+  include a `timing` summary: per-phase (parallel members → slowest member) and
+  total (phases run sequentially → sum), in seconds **and minutes**. Lets the
+  operator size a maintenance window before touching anything.
+  - Model (`_EST`, `estimate_step_seconds`): per-step typical = power-on +
+    boot/health (status≈20 s, agent≈45 s, or fixed delay) for start, or
+    power + ACPI shutdown (≈30 s) / hard stop (≈5 s) for stop. Worst case is
+    bounded by the configured `step_timeout_sec` (+ `storage_wait_sec` when the
+    member waits on storage). No-ops/absent members cost 0.
+- **Real per-step + per-job durations.** `_run_step` records
+  `elapsed_sec`/`elapsed_min` for each member (try/finally, even on failure);
+  the job records total `elapsed_sec`/`elapsed_min`. Exposed in `job`, `jobs`.
+- **UI:** sequence preview shows `≈ N min` per phase + total; the plan shows a
+  `⏱ ≈ N min (máx M min)` chip and a per-row `≈ Tiempo` column; jobs show a
+  per-step `Duración` column and total `⏱` in the header and in the jobs list.
+
 ## [1.5.0] - 2026-06-07
 
 ### Changed — phase/wave model + much simpler UI (ui-ux-pro-max + effortless-flow)

@@ -224,6 +224,78 @@ def test_build_plan_stop_reverses_waves(plugin):
     assert steps[-1]['wave'] == 2 and steps[-1]['vmid'] == 516
 
 
+# --- time estimation --------------------------------------------------------
+
+def test_estimate_step_noop_and_absent_are_zero(plugin):
+    s = {'present': False, 'action': 'start'}
+    assert plugin.estimate_step_seconds(s, plugin._DEFAULT_GROUP_SETTINGS) == (0, 0)
+    s = {'present': True, 'noop': True, 'action': 'start'}
+    assert plugin.estimate_step_seconds(s, plugin._DEFAULT_GROUP_SETTINGS) == (0, 0)
+
+
+def test_estimate_step_start_modes(plugin):
+    st = dict(plugin._DEFAULT_GROUP_SETTINGS)  # step_timeout=300, storage_wait=120
+    base = {'present': True, 'noop': False, 'action': 'start', 'storage': []}
+    # status health: typical = power(5)+boot_status(20); worst = power+timeout
+    est, mx = plugin.estimate_step_seconds(dict(base, health={'mode': 'status'}), st)
+    assert est == 25 and mx == 305
+    # agent health: typical = power(5)+boot_agent(45)
+    est, mx = plugin.estimate_step_seconds(dict(base, health={'mode': 'agent'}), st)
+    assert est == 50 and mx == 305
+    # fixed delay: typical == worst == power + delay
+    est, mx = plugin.estimate_step_seconds(
+        dict(base, health={'mode': 'delay', 'delay_sec': 40}), st)
+    assert est == 45 and mx == 45
+
+
+def test_estimate_step_storage_wait_adds_to_worst_case(plugin):
+    st = dict(plugin._DEFAULT_GROUP_SETTINGS)
+    s = {'present': True, 'noop': False, 'action': 'start',
+         'health': {'mode': 'status'}, 'storage': [{'storage': 'x'}],
+         'storage_policy': 'wait'}
+    est, mx = plugin.estimate_step_seconds(s, st)
+    assert mx == 305 + 120        # step_timeout + storage_wait
+    # policy=skip does not add the storage wait to the ceiling
+    s2 = dict(s, storage_policy='skip')
+    assert plugin.estimate_step_seconds(s2, st)[1] == 305
+
+
+def test_estimate_step_stop(plugin):
+    st = dict(plugin._DEFAULT_GROUP_SETTINGS)
+    s = {'present': True, 'noop': False, 'action': 'stop', 'stop_mode': 'shutdown'}
+    assert plugin.estimate_step_seconds(s, st) == (35, 305)   # power+shutdown ; power+timeout
+    s2 = dict(s, stop_mode='stop')
+    assert plugin.estimate_step_seconds(s2, st) == (10, 305)  # power+hard_stop
+
+
+def test_plan_timing_parallel_phase_takes_slowest_total_is_sum(plugin):
+    group = {'id': 'g', 'members': [
+        {'vmid': 516, 'order': 1, 'health': {'mode': 'status'}},  # phase 1 alone
+        {'vmid': 534, 'order': 2, 'health': {'mode': 'status'}},  # phase 2 parallel
+        {'vmid': 535, 'order': 2, 'health': {'mode': 'agent'}},   # slower (agent)
+    ]}
+    inv = {v: {'node': 'pve1', 'name': str(v), 'type': 'qemu', 'status': 'stopped'}
+           for v in (516, 534, 535)}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    # every step carries a timing dict
+    assert all('timing' in s and 'est_min' in s['timing'] for s in steps)
+    t = plugin.plan_timing(steps)
+    assert len(t['phases']) == 2
+    # phase 1: only 516 (status) = 25s
+    assert t['phases'][0]['est_sec'] == 25 and t['phases'][0]['parallel'] is False
+    # phase 2: max(status=25, agent=50) = 50s, flagged parallel
+    assert t['phases'][1]['est_sec'] == 50 and t['phases'][1]['parallel'] is True
+    # total = sum across sequential phases = 25 + 50 = 75s = 1.2 min (rounded)
+    assert t['est_sec'] == 75
+    assert t['est_min'] == round(75 / 60, 1)
+
+
+def test_minutes_helper(plugin):
+    assert plugin._minutes(0) == 0
+    assert plugin._minutes(90) == 1.5
+    assert plugin._minutes(75) == 1.2
+
+
 def test_build_plan_storage_policy_default_and_override(plugin):
     group = {'id': 'g', 'members': [
         {'vmid': 100, 'order': 10},                          # default -> wait
