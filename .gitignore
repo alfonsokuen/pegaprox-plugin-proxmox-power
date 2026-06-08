@@ -3,6 +3,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 config.json
+.autostart_state.json
 *.tmp
+*.bak
 .venv/
 .DS_Store

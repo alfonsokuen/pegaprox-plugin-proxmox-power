@@ -115,6 +115,12 @@
   .gitem{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--panel2)}
   .gitem .gn{font-weight:600}
   .gitem .ga{display:flex;gap:6px}
+  .asbanner{background:#1b1407;border:1px solid #5a4a22;color:#e8d9b5;border-radius:8px;padding:11px 13px;font-size:12.5px;line-height:1.5;margin-bottom:14px}
+  label.ck.asbig{font-size:14px;padding:6px 0}
+  .asgroups{display:flex;flex-direction:column;gap:6px}
+  .asgrp{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--panel2)}
+  .asgrp .on{margin-left:auto;font-size:11px}
+  .asgrp.sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,.18)}
 </style>
 </head>
 <body>
@@ -177,6 +183,33 @@
 
   <!-- CONFIG -->
   <section data-pane="cfg" hidden>
+    <div class="card" style="margin-bottom:16px"><h2>Arranque automático</h2>
+      <div class="body">
+        <div class="asbanner">⚡ Cuando PegaProx vuelva a encenderse (p.ej. tras un corte de luz), enciende
+          <b>automáticamente</b> los grupos que elijas — en orden, por fases y con health-gating, igual que un arranque manual.
+          Es <b>encendido REAL</b> y depende de ti: viene <b>apagado</b> por defecto. Se dispara <b>una sola vez por arranque</b>
+          (recargar o actualizar el plugin no lo vuelve a lanzar) y nunca apaga nada.</div>
+        <label class="ck asbig"><input type="checkbox" id="asEnabled"> <b>Encender mis grupos automáticamente al arrancar PegaProx</b></label>
+        <div id="asBody" hidden>
+          <div class="fgrid" style="margin-top:12px">
+            <label class="fld">Cluster por defecto
+              <select id="asCluster"></select></label>
+            <label class="fld">Esperar antes de arrancar (s)
+              <input id="asDelay" type="number" min="0" step="5" value="30"></label>
+            <label class="fld">Máx. espera de conexión al cluster (s)
+              <input id="asWait" type="number" min="0" step="10" value="300"></label>
+          </div>
+          <h3 style="margin:16px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">Grupos a encender (en este orden)</h3>
+          <div id="asGroups" class="asgroups"><div class="empty">Crea grupos abajo para elegirlos aquí.</div></div>
+          <label class="ck" style="margin-top:12px"><input type="checkbox" id="asStopErr"> Detener los siguientes grupos si uno falla</label>
+          <div id="asState" class="muted" style="margin-top:12px;font-size:12px"></div>
+        </div>
+        <div class="toolbar" style="margin-top:14px">
+          <button id="asTestBtn" class="ghost">Probar ahora (simulado)</button>
+          <div class="grow"></div>
+          <button id="asSaveBtn" class="primary">Guardar</button>
+        </div>
+      </div></div>
     <div class="card" style="margin-bottom:16px"><h2>Actualizaciones</h2>
       <div class="body">
         <div class="row" style="flex-wrap:wrap">
@@ -665,6 +698,72 @@ async function applyUpdate(){
   }catch(e){ $('#updMsg').textContent='Falló la actualización: '+e.message; toast(e.message,'err'); }
 }
 
+// ---- autostart (unattended boot) ----
+let asCfg={enabled:false,cluster_id:'',groups:[],delay_sec:30,wait_cluster_sec:300,stop_on_error:false};
+async function loadAutostart(){
+  try{
+    if(!state.groups||!state.groups.length){ try{ state.groups=(await api('config')).groups||[]; }catch(e){} }
+    const r=await api('autostart/config'); asCfg=Object.assign(asCfg,r.settings||{});
+    $('#asEnabled').checked=!!asCfg.enabled; $('#asBody').hidden=!asCfg.enabled;
+    $('#asDelay').value=asCfg.delay_sec??30; $('#asWait').value=asCfg.wait_cluster_sec??300;
+    $('#asStopErr').checked=!!asCfg.stop_on_error;
+    // cluster dropdown (reuse loaded clusters)
+    const sel=$('#asCluster'); sel.innerHTML='';
+    let cl=[]; try{ cl=(await api('clusters')).clusters||[]; }catch(e){}
+    cl.forEach(c=>{const o=el('option');o.value=c.id;o.textContent=c.name;sel.appendChild(o);});
+    sel.value=asCfg.cluster_id||(cl[0]?.id||'');
+    renderAsGroups();
+    renderAsState(r.state||{});
+  }catch(e){ /* endpoint may be missing on an older build */ }
+}
+function renderAsGroups(){
+  const box=$('#asGroups'); const gs=state.groups||[];
+  if(!gs.length){ box.innerHTML='<div class="empty">Crea grupos abajo para elegirlos aquí.</div>'; return; }
+  const sel=new Set(asCfg.groups||[]);
+  box.innerHTML='';
+  // selected first (in saved order), then the rest
+  const ordered=[...((asCfg.groups||[]).map(id=>gs.find(g=>g.id===id)).filter(Boolean)),
+                 ...gs.filter(g=>!sel.has(g.id))];
+  ordered.forEach(g=>{
+    const on=sel.has(g.id); const idx=on?(asCfg.groups.indexOf(g.id)+1):'';
+    const d=el('div','asgrp'+(on?' sel':''));
+    d.innerHTML=`<label class="ck"><input type="checkbox" ${on?'checked':''}> <b>${g.name||g.id}</b></label>
+      <span class="muted" style="font-size:12px">${(g.members||[]).length} VM/CT</span>
+      <span class="on muted">${on?('orden '+idx):''}</span>`;
+    d.querySelector('input').onchange=e=>{
+      asCfg.groups=asCfg.groups||[];
+      if(e.target.checked){ if(!asCfg.groups.includes(g.id)) asCfg.groups.push(g.id); }
+      else { asCfg.groups=asCfg.groups.filter(x=>x!==g.id); }
+      renderAsGroups();
+    };
+    box.appendChild(d);
+  });
+}
+function renderAsState(st){
+  const box=$('#asState'); if(!st||!st.boot_id&&!st.results){ box.textContent=''; return; }
+  const res=(st.results||[]).map(r=>`${r.group}: ${r.status}${r.elapsed_min!=null?(' · '+fmtMin((r.elapsed_min||0)*60)):''}`).join(' · ');
+  box.innerHTML=`Última ejecución automática: ${st.finished?('<b>'+st.finished+'</b>'):(st.started?('iniciada '+st.started):'—')}${res?(' — '+res):''}`;
+}
+async function saveAutostart(){
+  const payload={autostart:{
+    enabled:$('#asEnabled').checked, cluster_id:$('#asCluster').value||'',
+    groups:asCfg.groups||[], delay_sec:+$('#asDelay').value||0,
+    wait_cluster_sec:+$('#asWait').value||0, stop_on_error:$('#asStopErr').checked}};
+  try{ const r=await api('autostart/save',{method:'POST',body:JSON.stringify(payload)});
+    asCfg=r.autostart; toast('Arranque automático guardado','ok');
+  }catch(e){ toast(e.message,'err'); }
+}
+async function testAutostart(){
+  const real=$('#asEnabled').checked && window.confirm('¿Probar en SIMULADO (dry-run)? Pulsa Aceptar para simular sin encender nada.');
+  // Always dry-run from this button (safe preview). Real boot only happens at PegaProx start.
+  if(!(asCfg.groups||[]).length){ toast('Elige al menos un grupo','err'); return; }
+  try{ const r=await api('autostart/run',{method:'POST',body:JSON.stringify({})});
+    toast(`Prueba lanzada (simulada): ${r.results.length} grupo(s)`,'ok');
+    // jump to Trabajos to watch
+    document.querySelector('.tabs button[data-tab="jobs"]').click();
+  }catch(e){ toast(e.message,'err'); }
+}
+
 // ---- wiring ----
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
@@ -672,7 +771,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   const t=b.dataset.tab;
   document.querySelectorAll('section[data-pane]').forEach(s=>s.hidden=s.dataset.pane!==t);
   if(t==='inv')loadInventory(); if(t==='jobs')loadJobs();
-  if(t==='cfg'){loadCfgGroups(); loadCfgEditor(); checkUpdate();}
+  if(t==='cfg'){loadCfgGroups(); loadCfgEditor(); checkUpdate(); loadAutostart();}
 });
 $('#clusterSel').onchange=e=>{state.cluster=e.target.value;loadClusters();};
 $('#refreshBtn').onclick=()=>{loadClusters();loadGroups();};
@@ -684,6 +783,9 @@ $('#cfgReload').onclick=loadCfgEditor;
 $('#cfgSave').onclick=saveCfg;
 $('#checkUpdBtn').onclick=checkUpdate;
 $('#applyUpdBtn').onclick=applyUpdate;
+$('#asEnabled').onchange=e=>{ $('#asBody').hidden=!e.target.checked; };
+$('#asSaveBtn').onclick=saveAutostart;
+$('#asTestBtn').onclick=testAutostart;
 $('#newGroupBtn').onclick=()=>openEditor(null);
 $('#geAddMember').onclick=()=>{ edit.members.push(blankMember()); renderMembers(); };
 $('#geCancel').onclick=closeEditor;

@@ -66,7 +66,7 @@ def main():
 
     # --- version via update/check ---
     code, j = jget('update/check')
-    ok('version 1.6.0', j.get('current') == '1.6.0', f"current={j.get('current')}")
+    ok('version 1.7.0', j.get('current') == '1.7.0', f"current={j.get('current')}")
 
     # --- clusters + inventory ---
     code, j = jget('clusters')
@@ -142,6 +142,35 @@ def main():
     jobs = j.get('jobs', [])
     mine = next((x for x in jobs if x['id'] == job_id), {})
     ok('jobs list duration', 'elapsed_min' in mine, f"elapsed_min={mine.get('elapsed_min')}")
+
+    # --- autostart (unattended boot) — opt-in, never fires now ---
+    code, j = jget('autostart/config')
+    ok('autostart/config', code == 200 and 'settings' in j,
+       f"enabled={j.get('settings', {}).get('enabled')}")
+    # save: arm for NEXT boot only (saving does not power anything on now)
+    code, j = jpost('autostart/save', {'autostart': {
+        'enabled': True, 'cluster_id': cid, 'groups': ['e2e-timing'],
+        'delay_sec': 0, 'wait_cluster_sec': 30}})
+    ok('autostart/save persists', code == 200 and j.get('autostart', {}).get('groups') == ['e2e-timing'])
+    code, j = jpost('autostart/save', {'autostart': {'enabled': True, 'groups': ['does-not-exist']}})
+    ok('autostart/save rejects unknown group', code == 400, f'HTTP {code}')
+    # run now in DRY-RUN (default): previews the unattended boot, no VM mutated
+    code, j = jpost('autostart/run', {})
+    ok('autostart/run dry-run', code == 200 and j.get('dry_run') is True,
+       f"{len(j.get('results', []))} group(s)")
+    asjob = (j.get('results') or [{}])[0].get('job')
+    if asjob:
+        jb = {}
+        for _ in range(40):
+            code, jb = jget(f'job?id={asjob}')
+            if jb.get('status') != 'running':
+                break
+            time.sleep(0.5)
+        ok('autostart job done + dry-run', jb.get('status') in ('done', 'failed') and jb.get('dry_run') is True,
+           f"status={jb.get('status')}")
+    # disarm so we leave the box exactly as we found it
+    code, j = jpost('autostart/save', {'autostart': {'enabled': False, 'groups': []}})
+    ok('autostart disarmed', code == 200 and j.get('autostart', {}).get('enabled') is False)
 
     # --- cleanup: remove the e2e group ---
     code, j = jpost('config/save', {'groups': []})

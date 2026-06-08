@@ -38,6 +38,9 @@ Routes (dispatched by the PegaProx catch-all, all under
   POST execute                 -> run the plan (dry-run unless confirm=true) (vm.power)
   GET  job?id=                 -> live status of an execution job
   GET  jobs                    -> recent execution jobs
+  GET  autostart/config        -> unattended-boot settings + last-run state
+  POST autostart/save          -> persist unattended-boot settings (vm.power)
+  POST autostart/run           -> trigger the autostart groups now (dry-run unless confirm)
 
 Author: IDKMANAGER
 License: MIT
@@ -1020,6 +1023,28 @@ def _execute_job(job, manager, group, inventory, steps):
     job['elapsed_min'] = _minutes(job['elapsed_sec'])
 
 
+def _dispatch_group(manager, cluster_id, group, action, dry_run, username, sync=False):
+    """Build a plan for ``group`` and run it as a job (shared by the HTTP execute
+    handler and the autostart runner). With ``sync`` the job runs in the calling
+    thread (the autostart runner is already a background thread); otherwise it
+    runs in its own daemon thread. Returns (job, steps). May raise ValueError on
+    an unorderable group (cycle / unknown dependency)."""
+    inv = fetch_inventory(manager)
+    vm_configs, storage_by_node, storage_defs = _collect_plan_inputs(manager, group, inv)
+    steps = build_plan(group, inv, vm_configs, storage_by_node, action, storage_defs)
+    job = _new_job(cluster_id, group['id'], action, dry_run, username)
+    log_audit(user=username,
+              action=f'power.{action}' + ('_dryrun' if dry_run else ''),
+              details=f"group={group['id']} steps={len(steps)} dry_run={dry_run} by={username}",
+              cluster=cluster_id)
+    if sync:
+        _execute_job(job, manager, group, inv, steps)
+    else:
+        threading.Thread(target=_execute_job, args=(job, manager, group, inv, steps),
+                         daemon=True, name=f'power-{job["id"]}').start()
+    return job, steps
+
+
 # ---------------------------------------------------------------------------
 # Auto-update (in-plugin)
 # ---------------------------------------------------------------------------
@@ -1140,6 +1165,180 @@ def apply_update(source=None, allow_downgrade=False):
             f.write(content)
         os.replace(tmp, path)
     return {'applied': True, 'from': cur, 'to': new_ver}
+
+
+# ---------------------------------------------------------------------------
+# Autostart on PegaProx ready (opt-in unattended boot of the whole cluster)
+# ---------------------------------------------------------------------------
+# When PegaProx comes up after a power event, optionally bring up the operator's
+# configured group(s) automatically — ordered, phased and health-gated, exactly
+# like a manual real run. It is OFF by default ("depende del usuario") and fires
+# at most ONCE per boot: a marker keyed on the OS boot id survives plugin
+# reloads/updates so a reload never re-triggers a mass power-on. It only ever
+# *starts* (never auto-stops), waits for the cluster manager to connect first,
+# and skips guests that are already running (idempotent).
+
+_DEFAULT_AUTOSTART = {
+    'enabled': False,        # opt-in — never auto power-on unless the user turns it on
+    'cluster_id': '',        # fallback cluster when a group has none
+    'groups': [],            # ordered list of group ids to start, in order
+    'delay_sec': 30,         # grace after PegaProx is up before firing
+    'wait_cluster_sec': 300, # max wait for the cluster manager to connect
+    'stop_on_error': False,  # stop launching later groups after a failed one
+}
+
+_autostart_started = False
+_autostart_lock = threading.Lock()
+
+
+def _autostart_settings():
+    cfg = _load_config()
+    s = dict(_DEFAULT_AUTOSTART)
+    s.update(cfg.get('autostart') or {})
+    return s
+
+
+def _autostart_state_path():
+    return os.path.join(PLUGIN_DIR, '.autostart_state.json')
+
+
+def _read_autostart_state():
+    try:
+        with open(_autostart_state_path()) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_autostart_state(state):
+    try:
+        tmp = _autostart_state_path() + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, _autostart_state_path())
+    except Exception as e:
+        log.warning(f'[{PLUGIN_ID}] autostart state write failed: {e}')
+
+
+def _current_boot_id():
+    """A token that is stable within one OS boot and changes on reboot.
+
+    Used to fire autostart only once per boot while ignoring plugin reloads.
+    Linux: /proc/sys/kernel/random/boot_id, else btime from /proc/stat. Returns
+    None when it can't be determined (e.g. on a dev box); callers then fall back
+    to a per-process guard.
+    """
+    try:
+        with open('/proc/sys/kernel/random/boot_id') as f:
+            return f.read().strip()
+    except Exception:
+        pass
+    try:
+        with open('/proc/stat') as f:
+            for line in f:
+                if line.startswith('btime'):
+                    return 'btime-' + line.split()[1]
+    except Exception:
+        pass
+    return None
+
+
+def _wait_manager(cluster_id, timeout_sec):
+    """Block until the cluster manager is connected, or timeout. Returns the
+    manager or None."""
+    deadline = time.time() + max(0, timeout_sec)
+    while True:
+        manager = None
+        try:
+            manager, err = get_connected_manager(cluster_id)
+            if err:
+                manager = None
+        except Exception:
+            manager = None
+        if manager and getattr(manager, 'is_connected', True):
+            return manager
+        if time.time() >= deadline:
+            return None
+        time.sleep(5)
+
+
+def _run_autostart_groups(settings, username='autostart', dry_run=False, sync=True):
+    """Start every configured group in order. Returns a list of per-group
+    result dicts. Each group resolves its own cluster (or the autostart
+    fallback) and waits for the manager to connect before running."""
+    results = []
+    for gid in (settings.get('groups') or []):
+        cfg = _load_config()
+        group = _get_group(cfg, gid)
+        if not group:
+            results.append({'group': gid, 'status': 'skipped', 'detail': 'group not found'})
+            continue
+        cluster_id = group.get('cluster_id') or settings.get('cluster_id')
+        if not cluster_id:
+            results.append({'group': gid, 'status': 'skipped', 'detail': 'no cluster_id'})
+            continue
+        manager = _wait_manager(cluster_id, int(settings.get('wait_cluster_sec', 300) or 0))
+        if not manager:
+            results.append({'group': gid, 'status': 'failed', 'detail': 'cluster manager not connected'})
+            if settings.get('stop_on_error'):
+                break
+            continue
+        try:
+            job, steps = _dispatch_group(manager, cluster_id, group, 'start', dry_run, username, sync=sync)
+            results.append({'group': gid, 'job': job['id'], 'steps': len(steps),
+                            'status': job['status'] if sync else 'running',
+                            'elapsed_min': job.get('elapsed_min')})
+            if sync and job['status'] == 'failed' and settings.get('stop_on_error'):
+                break
+        except Exception as e:
+            results.append({'group': gid, 'status': 'failed', 'detail': str(e)[:200]})
+            if settings.get('stop_on_error'):
+                break
+    return results
+
+
+def _autostart_runner():
+    """Background thread started from register(): fire the configured groups once
+    per boot. Never raises (this runs detached)."""
+    try:
+        settings = _autostart_settings()
+        if not settings.get('enabled'):
+            return
+        boot_id = _current_boot_id()
+        with _autostart_lock:
+            state = _read_autostart_state()
+            # Already fired (or in progress) for this boot -> skip on reload.
+            if boot_id and state.get('boot_id') == boot_id and (
+                    state.get('completed') or state.get('started')):
+                log.info(f'[{PLUGIN_ID}] autostart: already handled this boot, skipping')
+                return
+            _write_autostart_state({'boot_id': boot_id, 'started': _now_iso(),
+                                    'completed': False})
+        delay = int(settings.get('delay_sec', 30) or 0)
+        if delay:
+            time.sleep(delay)
+        log.info(f'[{PLUGIN_ID}] autostart: firing groups {settings.get("groups")}')
+        results = _run_autostart_groups(settings, username='autostart', dry_run=False, sync=True)
+        state = _read_autostart_state()
+        state.update({'completed': True, 'finished': _now_iso(), 'results': results})
+        _write_autostart_state(state)
+        log.info(f'[{PLUGIN_ID}] autostart: done {results}')
+    except Exception as e:
+        log.warning(f'[{PLUGIN_ID}] autostart runner error: {e}')
+
+
+def _maybe_schedule_autostart():
+    """Called from register(): spawn the autostart thread when enabled. The
+    once-per-boot marker guarantees a reload won't re-trigger a power-on."""
+    global _autostart_started
+    try:
+        if _autostart_settings().get('enabled') and not _autostart_started:
+            _autostart_started = True
+            threading.Thread(target=_autostart_runner, daemon=True,
+                             name='power-autostart').start()
+            log.info(f'[{PLUGIN_ID}] autostart scheduled (enabled)')
+    except Exception as e:
+        log.warning(f'[{PLUGIN_ID}] autostart schedule error: {e}')
 
 
 # ---------------------------------------------------------------------------
@@ -1354,23 +1553,11 @@ def execute_handler():
     if err:
         return err
     try:
-        inv = fetch_inventory(manager)
-        vm_configs, storage_by_node, storage_defs = _collect_plan_inputs(manager, group, inv)
-        steps = build_plan(group, inv, vm_configs, storage_by_node, action, storage_defs)
+        job, steps = _dispatch_group(manager, cluster_id, group, action, dry_run, _username())
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': safe_error(e, 'plan failed')}), 500
-
-    job = _new_job(cluster_id, group['id'], action, dry_run, _username())
-    log_audit(user=_username(),
-              action=f'power.{action}' + ('_dryrun' if dry_run else ''),
-              details=f"group={group['id']} steps={len(steps)} dry_run={dry_run}",
-              cluster=cluster_id)
-    t = threading.Thread(
-        target=_execute_job, args=(job, manager, group, inv, steps),
-        daemon=True, name=f'power-{job["id"]}')
-    t.start()
     return jsonify({'job_id': job['id'], 'dry_run': dry_run, 'steps': len(steps),
                     'timing': plan_timing(steps)})
 
@@ -1400,6 +1587,61 @@ def update_apply_handler():
     # Hint the UI to live-reload the plugin via PegaProx's reload route.
     result['reload_url'] = f'/api/plugins/{PLUGIN_ID}/reload'
     return jsonify(result)
+
+
+def autostart_config_handler():
+    if (err := _require(PERM_VIEW)):
+        return err
+    return jsonify({'settings': _autostart_settings(), 'state': _read_autostart_state()})
+
+
+def autostart_save_handler():
+    if (err := _require(PERM_POWER)):
+        return err
+    body = request.get_json(silent=True) or {}
+    a = body.get('autostart') if isinstance(body.get('autostart'), dict) else body
+    out = dict(_DEFAULT_AUTOSTART)
+    out['enabled'] = bool(a.get('enabled'))
+    out['cluster_id'] = str(a.get('cluster_id') or '').strip()
+    groups = a.get('groups') or []
+    if not isinstance(groups, list):
+        return jsonify({'error': 'autostart.groups must be a list'}), 400
+    out['groups'] = [str(g) for g in groups]
+    for key, lo in (('delay_sec', 0), ('wait_cluster_sec', 0)):
+        try:
+            out[key] = max(lo, int(a.get(key, _DEFAULT_AUTOSTART[key])))
+        except (TypeError, ValueError):
+            return jsonify({'error': f'autostart.{key} must be an integer'}), 400
+    out['stop_on_error'] = bool(a.get('stop_on_error'))
+    # Validate referenced groups exist (warn-only: allow saving ahead of creation
+    # is rejected to avoid silent no-ops at boot).
+    cfg = _load_config()
+    known = {g.get('id') for g in cfg.get('groups', [])}
+    missing = [g for g in out['groups'] if g not in known]
+    if out['enabled'] and missing:
+        return jsonify({'error': f"unknown group(s): {', '.join(missing)}"}), 400
+    cfg['autostart'] = out
+    _save_config(cfg)
+    log_audit(user=_username(), action='power.autostart_saved',
+              details=f"enabled={out['enabled']} groups={out['groups']}")
+    return jsonify({'ok': True, 'autostart': out})
+
+
+def autostart_run_handler():
+    """Manually trigger the autostart groups now (defaults to dry-run). Lets the
+    operator preview/test the unattended boot without rebooting."""
+    if (err := _require(PERM_POWER)):
+        return err
+    body = request.get_json(silent=True) or {}
+    dry_run = not (body.get('confirm') is True)
+    settings = _autostart_settings()
+    if not settings.get('groups'):
+        return jsonify({'error': 'no autostart groups configured'}), 400
+    # Run async so the HTTP call returns immediately; results land as normal jobs.
+    results = _run_autostart_groups(settings, username=_username(), dry_run=dry_run, sync=False)
+    log_audit(user=_username(), action='power.autostart_run' + ('_dryrun' if dry_run else ''),
+              details=f"groups={settings.get('groups')} dry_run={dry_run}")
+    return jsonify({'ok': True, 'dry_run': dry_run, 'results': results})
 
 
 def job_handler():
@@ -1446,7 +1688,12 @@ def register(app=None):
         'jobs': jobs_handler,
         'update/check': update_check_handler,
         'update/apply': update_apply_handler,
+        'autostart/config': autostart_config_handler,
+        'autostart/save': autostart_save_handler,
+        'autostart/run': autostart_run_handler,
     }
     for path, handler in routes.items():
         register_plugin_route(PLUGIN_ID, path, handler)
     log.info(f"[{PLUGIN_ID}] Registered {len(routes)} routes")
+    # Opt-in unattended boot: fires once per OS boot when the operator enabled it.
+    _maybe_schedule_autostart()

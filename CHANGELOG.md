@@ -3,6 +3,30 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-06-08
+
+### Added — unattended boot when PegaProx comes up (opt-in)
+- **Autostart on PegaProx ready.** When PegaProx starts (e.g. after a power
+  event), it can automatically bring up the operator's chosen group(s) —
+  ordered, phased and health-gated, exactly like a manual real run. This is the
+  initial cluster-wide power-on the plugin was built for.
+  - **Opt-in & user-controlled** ("depende del usuario"): OFF by default, fully
+    configured from the UI (Configuración → *Arranque automático*): toggle,
+    default cluster, ordered group list, pre-boot delay, max cluster-connect
+    wait, and stop-on-error.
+  - **Fires once per OS boot.** A marker keyed on the boot id
+    (`/proc/sys/kernel/random/boot_id`, btime fallback) survives plugin
+    reloads/updates, so a reload never re-triggers a mass power-on. Records a
+    `started`/`completed` state with per-group results.
+  - **Safe by design:** only ever *starts* (never auto-stops), waits for the
+    cluster manager to connect before acting, skips already-running guests
+    (idempotent), and runs as a normal job (visible in Trabajos with timing).
+  - New routes: `autostart/config` (GET), `autostart/save` (POST, vm.power),
+    `autostart/run` (POST, vm.power — dry-run preview unless `confirm`).
+  - `register()` schedules the runner when enabled.
+- **Refactor:** `_dispatch_group()` now backs both the HTTP execute handler and
+  the autostart runner (single plan→job code path).
+
 ## [1.6.0] - 2026-06-07
 
 ### Added — time estimates + real durations (in minutes)
