@@ -3,6 +3,23 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-06-07
+
+### Fixed (self-review hardening, pre-deploy)
+- Storage gate no longer waits on `unused<N>` (detached) disks — Proxmox does
+  not need a detached volume's storage active to boot the guest, so gating start
+  on it was wrongly over-strict.
+- Execution now does a **live status re-check** immediately before each step:
+  the plan is built moments earlier, so a guest may have changed state (a
+  dependency's start, a manual action). Start/stop steps are now idempotent and
+  race-safe instead of acting on stale plan state.
+- `config/save` validates each member has an integer `vmid` → returns 400
+  instead of a 500 on malformed input.
+- `job` endpoint snapshots the job under the lock before serializing, avoiding a
+  torn read while the executor thread mutates steps/log.
+- Cluster selector shows the friendly cluster name (`manager.config.name`)
+  instead of the internal id.
+
 ## [1.0.0] - 2026-06-07
 
 ### Added

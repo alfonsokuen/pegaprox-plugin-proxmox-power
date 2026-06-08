@@ -80,9 +80,12 @@ REMOTE_STORAGE_TYPES = {
     'cephfs', 'rbd', 'zfs',  # zfs-over-iscsi
 }
 
-# Config keys whose value carries a "<storage>:<volume>" reference.
+# Config keys whose value carries a "<storage>:<volume>" reference that the
+# guest needs *to boot*. Deliberately excludes ``unused<N>`` (detached disks):
+# Proxmox does not require a detached volume's storage to be active to start the
+# guest, so gating start on it would be wrongly over-strict.
 _DISK_KEY_RE = re.compile(
-    r'^(?:ide|sata|scsi|virtio|efidisk|tpmstate|rootfs|mp|unused)\d*$'
+    r'^(?:ide|sata|scsi|virtio|efidisk|tpmstate|rootfs|mp)\d*$'
 )
 
 # ---------------------------------------------------------------------------
@@ -639,6 +642,21 @@ def _execute_job(job, manager, group, inventory, steps):
             _job_log(job, f"{vmid}: {rec['detail']}")
             continue
 
+        # Live re-check: the plan was built moments ago; a guest may have
+        # changed state since (a dependency's start, a manual action). Make the
+        # step idempotent and race-safe instead of acting on stale plan state.
+        live_status = fetch_vm_status(manager, node, vtype, vmid).get('status', 'unknown')
+        if action == 'start' and live_status == 'running':
+            rec['state'] = 'skipped'
+            rec['detail'] = 'already running (live)'
+            _job_log(job, f"{vmid}: skipped (already running)")
+            continue
+        if action == 'stop' and live_status == 'stopped':
+            rec['state'] = 'skipped'
+            rec['detail'] = 'already stopped (live)'
+            _job_log(job, f"{vmid}: skipped (already stopped)")
+            continue
+
         try:
             if action == 'start':
                 # storage gate (loop) — spec steps 2/6/7, local vs remote branch
@@ -733,9 +751,12 @@ def clusters_handler():
         allowed, _ = check_cluster_access(cid)
         if not allowed:
             continue
+        # Friendly name lives on the manager's config object (manager.config.name);
+        # the manager itself only carries .id. Fall back to the id.
+        cfg = getattr(mgr, 'config', None)
         out.append({
             'id': cid,
-            'name': getattr(mgr, 'name', cid),
+            'name': getattr(cfg, 'name', None) or cid,
             'connected': getattr(mgr, 'is_connected', False),
         })
     return jsonify({'clusters': out})
@@ -772,6 +793,13 @@ def config_save_handler():
     for g in groups:
         if not g.get('id'):
             return jsonify({'error': 'each group needs an id'}), 400
+        for m in g.get('members', []):
+            if 'vmid' not in m:
+                return jsonify({'error': f"group '{g.get('id')}': a member is missing 'vmid'"}), 400
+            try:
+                int(m['vmid'])
+            except (TypeError, ValueError):
+                return jsonify({'error': f"group '{g.get('id')}': vmid '{m.get('vmid')}' is not an integer"}), 400
         try:
             topo_order(g.get('members', []))
         except ValueError as e:
@@ -890,9 +918,12 @@ def job_handler():
     job_id = request.args.get('id', '').strip()
     with _jobs_lock:
         job = _jobs.get(job_id)
-    if not job:
+        # Snapshot under the lock: the executor thread mutates steps/log live, so
+        # serialize a shallow copy (incl. a copied steps list) to avoid a torn read.
+        snap = dict(job, steps=list(job['steps']), log=list(job['log'])) if job else None
+    if not snap:
         return jsonify({'error': 'job not found'}), 404
-    return jsonify(job)
+    return jsonify(snap)
 
 
 def jobs_handler():

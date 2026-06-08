@@ -109,7 +109,9 @@ def test_real_stop_uses_shutdown_and_waits_stopped(plugin):
 def test_start_aborts_when_storage_never_activates(plugin):
     FakeManager._idx = {}
     # iscsi storage stays inactive -> _wait_storage times out -> step fails.
-    mgr = FakeManager(storage={'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}})
+    # Guest reports stopped so the live re-check lets the start proceed to the gate.
+    mgr = FakeManager(status_script={100: ['stopped']},
+                      storage={'pve1': {'lun0': {'type': 'iscsi', 'enabled': 1, 'active': 0}}})
     group = {'id': 'g',
              'settings': {'poll_interval_sec': 0, 'storage_wait_sec': 0,
                           'step_timeout_sec': 1, 'continue_on_error': False},
@@ -123,6 +125,23 @@ def test_start_aborts_when_storage_never_activates(plugin):
     assert job['status'] == 'failed'
     assert job['steps'][0]['state'] == 'failed'
     # Power start must NOT have been attempted once storage failed the gate.
+    assert not any(u.endswith('/status/start') for _, u in mgr.calls)
+
+
+def test_live_recheck_skips_start_if_already_running(plugin):
+    FakeManager._idx = {}
+    # Plan was built when the VM was stopped, but it came up since (e.g. a
+    # dependency started it). Live re-check must skip the start, not error.
+    mgr = FakeManager(status_script={100: ['running']})
+    group = {'id': 'g', 'settings': {'poll_interval_sec': 0},
+             'members': [{'vmid': 100, 'order': 10}]}
+    inv = {100: {'node': 'pve1', 'name': 'db', 'type': 'qemu', 'status': 'stopped'}}
+    steps = plugin.build_plan(group, inv, {}, {}, 'start')
+    assert steps[0]['noop'] is False  # plan thought it was stopped
+    job = _mk_job(plugin, 'start', dry_run=False)
+    plugin._execute_job(job, mgr, group, inv, steps)
+    assert job['steps'][0]['state'] == 'skipped'
+    assert 'already running' in job['steps'][0]['detail']
     assert not any(u.endswith('/status/start') for _, u in mgr.calls)
 
 

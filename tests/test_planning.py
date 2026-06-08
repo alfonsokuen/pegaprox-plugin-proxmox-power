@@ -52,6 +52,14 @@ def test_extract_vm_storages_skips_cdrom_iso(plugin):
     assert plugin.extract_vm_storages(cfg) == set()
 
 
+def test_extract_vm_storages_skips_unused_detached_disks(plugin):
+    # A detached (unused) disk must NOT gate boot — its storage may be offline
+    # legitimately and Proxmox does not need it to start the guest.
+    cfg = {'scsi0': 'fast-lun:vm-100-disk-0',
+           'unused0': 'old-archive:vm-100-disk-9'}
+    assert plugin.extract_vm_storages(cfg) == {'fast-lun'}
+
+
 # --- startup parsing --------------------------------------------------------
 
 def test_parse_startup(plugin):
