@@ -3,6 +3,24 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.2] - 2026-06-09
+
+### Fixed — dangling autostart refs now self-heal (root cause + passive cleanup)
+- v1.8.1 only pruned dead group references when the operator explicitly saved the
+  autostart panel, so an already-dirty config kept showing phantom groups (e.g.
+  `["OMV Storage", "ultracorp"]` while only `ultracorp` exists) until someone
+  re-saved. Two further fixes:
+  - **Root cause — reconcile on group delete/rename.** `config/save` (the group
+    editor and advanced JSON editor) saved `groups` but never touched
+    `autostart.groups`, so deleting a group orphaned its autostart reference.
+    It now reconciles `autostart.groups` against the surviving groups in the same
+    write via `_reconcile_autostart_groups()`.
+  - **Passive self-heal on read.** `config` and `autostart/config` GET now scrub
+    (and persist) dead references when the page loads, so an existing dirty config
+    cleans itself with no manual save — the advanced JSON editor shows the real,
+    cleaned state. A valid id (`ultracorp`) is always kept; only ids with no
+    matching group are dropped.
+
 ## [1.8.1] - 2026-06-09
 
 ### Fixed — dangling group references no longer linger in autostart config

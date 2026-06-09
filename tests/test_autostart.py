@@ -180,3 +180,52 @@ def test_autostart_save_prunes_dangling_keeps_known(plugin, tmp_path, monkeypatc
     assert r[0] == 'JSON'
     saved = json.loads(open(path).read())['autostart']
     assert saved['groups'] == ['core']     # only the existing group id remains
+
+
+# --- self-heal on read + on group save (root cause of dangling refs) ---------
+
+def test_config_get_self_heals_dangling_autostart(plugin, tmp_path, monkeypatch):
+    # Carlos's exact case: group id 'ultracorp' exists, 'OMV Storage' is orphaned.
+    # Just reading the config (advanced JSON editor) must scrub the dead ref AND
+    # persist the cleanup — no manual save required.
+    path = _point_config(plugin, tmp_path, monkeypatch, {
+        'groups': [{'id': 'ultracorp', 'name': 'UltraCORP', 'members': []}],
+        'autostart': {'enabled': False, 'groups': ['OMV Storage', 'ultracorp']}})
+    r = plugin.config_handler()
+    assert r[0] == 'JSON'
+    assert r[1]['autostart']['groups'] == ['ultracorp']        # response is clean
+    assert json.loads(open(path).read())['autostart']['groups'] == ['ultracorp']  # disk healed
+
+
+def test_autostart_config_get_self_heals(plugin, tmp_path, monkeypatch):
+    path = _point_config(plugin, tmp_path, monkeypatch, {
+        'groups': [{'id': 'ultracorp', 'name': 'UltraCORP', 'members': []}],
+        'autostart': {'enabled': False, 'groups': ['OMV Storage', 'ultracorp']}})
+    r = plugin.autostart_config_handler()
+    assert r[0] == 'JSON'
+    assert r[1]['settings']['groups'] == ['ultracorp']
+    assert json.loads(open(path).read())['autostart']['groups'] == ['ultracorp']
+
+
+def test_config_get_leaves_clean_config_untouched(plugin, tmp_path, monkeypatch):
+    # No dangling refs -> no rewrite, nothing dropped.
+    _point_config(plugin, tmp_path, monkeypatch, {
+        'groups': [{'id': 'ultracorp', 'name': 'UltraCORP', 'members': []}],
+        'autostart': {'enabled': True, 'groups': ['ultracorp']}})
+    r = plugin.config_handler()
+    assert r[1]['autostart']['groups'] == ['ultracorp']
+
+
+def test_config_save_reconciles_autostart_on_group_delete(plugin, tmp_path, monkeypatch):
+    # Deleting the 'OMV Storage' group (saving the remaining groups) must scrub it
+    # from autostart.groups in the same write — the root cause fix.
+    path = _point_config(plugin, tmp_path, monkeypatch, {
+        'groups': [{'id': 'ultracorp', 'name': 'UltraCORP', 'members': []},
+                   {'id': 'OMV Storage', 'name': 'OMV Storage', 'members': []}],
+        'autostart': {'enabled': False, 'groups': ['OMV Storage', 'ultracorp']}})
+    # Save the group list WITHOUT 'OMV Storage' (i.e. it was deleted in the UI).
+    _set_body(plugin, monkeypatch,
+              {'groups': [{'id': 'ultracorp', 'name': 'UltraCORP', 'members': []}]})
+    r = plugin.config_save_handler()
+    assert r[0] == 'JSON'
+    assert json.loads(open(path).read())['autostart']['groups'] == ['ultracorp']

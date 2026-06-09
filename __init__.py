@@ -152,6 +152,23 @@ def _group_settings(group):
     return s
 
 
+def _reconcile_autostart_groups(cfg):
+    """Drop autostart.groups entries that don't match an existing group id.
+
+    A dangling reference (a group that was deleted or recreated with a new id)
+    can only ever be a silent no-op at boot ("group not found"), so it must
+    never linger in the config. Mutates ``cfg`` in place and returns the list of
+    pruned ids (empty when nothing changed)."""
+    a = cfg.get('autostart')
+    if not isinstance(a, dict) or not isinstance(a.get('groups'), list):
+        return []
+    known = {g.get('id') for g in cfg.get('groups', [])}
+    pruned = [gid for gid in a['groups'] if gid not in known]
+    if pruned:
+        a['groups'] = [gid for gid in a['groups'] if gid in known]
+    return pruned
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-tested without Flask / PegaProx)
 # ---------------------------------------------------------------------------
@@ -1501,7 +1518,12 @@ def inventory_handler():
 def config_handler():
     if (err := _require(PERM_VIEW)):
         return err
-    return jsonify(_load_config())
+    cfg = _load_config()
+    # Self-heal stale autostart references on read so a dirty config (left behind
+    # by an older build that didn't reconcile on group delete) never surfaces.
+    if _reconcile_autostart_groups(cfg):
+        _save_config(cfg)
+    return jsonify(cfg)
 
 
 def config_save_handler():
@@ -1540,9 +1562,13 @@ def config_save_handler():
             return jsonify({'error': f"group '{g.get('id')}': {e}"}), 400
     cfg = _load_config()
     cfg['groups'] = groups
+    # Deleting/renaming a group must not leave an orphaned reference behind in
+    # autostart.groups (the root cause of dangling refs). Reconcile in the same
+    # write so a removed group can never linger as a silent no-op at boot.
+    pruned = _reconcile_autostart_groups(cfg)
     _save_config(cfg)
     log_audit(user=_username(), action='power.config_saved',
-              details=f'{len(groups)} group(s)')
+              details=f'{len(groups)} group(s)' + (f' autostart_pruned={pruned}' if pruned else ''))
     return jsonify({'ok': True, 'groups': len(groups)})
 
 
@@ -1666,7 +1692,12 @@ def update_apply_handler():
 def autostart_config_handler():
     if (err := _require(PERM_VIEW)):
         return err
-    return jsonify({'settings': _autostart_settings(), 'state': _read_autostart_state()})
+    cfg = _load_config()
+    if _reconcile_autostart_groups(cfg):
+        _save_config(cfg)
+    settings = dict(_DEFAULT_AUTOSTART)
+    settings.update(cfg.get('autostart') or {})
+    return jsonify({'settings': settings, 'state': _read_autostart_state()})
 
 
 def autostart_save_handler():
