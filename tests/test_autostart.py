@@ -159,9 +159,24 @@ def test_autostart_save_persists_and_clamps(plugin, tmp_path, monkeypatch):
 
 
 def test_autostart_save_can_disable_with_unknown_groups(plugin, tmp_path, monkeypatch):
-    # When disabled, unknown groups don't block saving (operator turning it off).
+    # When disabled, unknown groups don't block saving (operator turning it off)
+    # AND the dead references are pruned, never persisted as a silent no-op.
     path = _point_config(plugin, tmp_path, monkeypatch, {'groups': []})
     _set_body(plugin, monkeypatch, {'autostart': {'enabled': False, 'groups': ['ghost']}})
     r = plugin.autostart_save_handler()
     assert r[0] == 'JSON'
-    assert json.loads(open(path).read())['autostart']['enabled'] is False
+    saved = json.loads(open(path).read())['autostart']
+    assert saved['enabled'] is False
+    assert saved['groups'] == []           # 'ghost' pruned, not persisted
+
+
+def test_autostart_save_prunes_dangling_keeps_known(plugin, tmp_path, monkeypatch):
+    # A real group survives; references to deleted/renamed groups are dropped.
+    path = _point_config(plugin, tmp_path, monkeypatch,
+                         {'groups': [{'id': 'core', 'name': 'UltraCORP', 'members': []}]})
+    _set_body(plugin, monkeypatch, {'autostart': {
+        'enabled': False, 'groups': ['OMV Storage', 'ultracorp', 'core']}})
+    r = plugin.autostart_save_handler()
+    assert r[0] == 'JSON'
+    saved = json.loads(open(path).read())['autostart']
+    assert saved['groups'] == ['core']     # only the existing group id remains

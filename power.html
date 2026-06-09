@@ -709,6 +709,14 @@ async function loadAutostart(){
   try{
     if(!state.groups||!state.groups.length){ try{ state.groups=(await api('config')).groups||[]; }catch(e){} }
     const r=await api('autostart/config'); asCfg=Object.assign(asCfg,r.settings||{});
+    // Drop references to groups that no longer exist (deleted or recreated with a
+    // new id) so they don't linger invisibly in asCfg.groups and get re-saved.
+    const knownIds=new Set((state.groups||[]).map(g=>g.id));
+    const dangling=(asCfg.groups||[]).filter(id=>!knownIds.has(id));
+    if(dangling.length){
+      asCfg.groups=(asCfg.groups||[]).filter(id=>knownIds.has(id));
+      toast('Grupos inexistentes retirados del arranque: '+dangling.join(', ')+'. Guarda para confirmar.','err');
+    }
     $('#asEnabled').checked=!!asCfg.enabled; $('#asBody').hidden=!asCfg.enabled;
     $('#asDelay').value=asCfg.delay_sec??30; $('#asWait').value=asCfg.wait_cluster_sec??300;
     $('#asStorageReady').value=asCfg.storage_ready_sec??600;

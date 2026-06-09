@@ -3,6 +3,24 @@
 All notable changes to this plugin are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.1] - 2026-06-09
+
+### Fixed — dangling group references no longer linger in autostart config
+- **Orphaned autostart groups are pruned instead of persisted.** When a group was
+  deleted or recreated with a new id, its reference stayed in `autostart.groups`
+  (e.g. `["OMV Storage", "ultracorp"]` while the only real group is `id:"core"`),
+  reported by QA as "hardcoded groups that don't exist". Two compounding defects:
+  - **Backend** (`autostart_save_handler`): unknown group ids were validated only
+    when `enabled=true`; a disabled save kept any dead reference verbatim. Now a
+    disabled save **prunes** ids that don't match an existing group (and returns
+    them under `pruned`), while enabling with dangling refs is still rejected so
+    the operator can't arm a silent no-op boot.
+  - **Frontend** (`renderAsGroups`/`loadAutostart`): dead ids were filtered out of
+    the displayed list but kept in `asCfg.groups` and re-saved. Loading now drops
+    references to non-existent groups and toasts which ones were removed.
+- A dead reference could only ever be skipped at boot (`group not found`); this is
+  cleanup, not a behaviour change to the boot sequence itself.
+
 ## [1.8.0] - 2026-06-08
 
 ### Added — wait for storage to be live before the sequence starts (spec 6/7)

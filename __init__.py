@@ -1687,18 +1687,32 @@ def autostart_save_handler():
         except (TypeError, ValueError):
             return jsonify({'error': f'autostart.{key} must be an integer'}), 400
     out['stop_on_error'] = bool(a.get('stop_on_error'))
-    # Validate referenced groups exist (warn-only: allow saving ahead of creation
-    # is rejected to avoid silent no-ops at boot).
+    # Reconcile referenced groups against the ones that actually exist. A
+    # reference to a deleted/renamed group can only ever be a silent no-op at
+    # boot ("group not found"), so it must never linger in the JSON.
     cfg = _load_config()
     known = {g.get('id') for g in cfg.get('groups', [])}
     missing = [g for g in out['groups'] if g not in known]
     if out['enabled'] and missing:
+        # Enabling with dangling references would silently no-op at boot — reject
+        # so the operator notices and fixes the selection.
         return jsonify({'error': f"unknown group(s): {', '.join(missing)}"}), 400
+    # Disabled save (or no dangling refs): prune the dead references instead of
+    # persisting them. This is what stops orphaned group ids/names from sticking
+    # in the config after a group is deleted or recreated with a new id.
+    pruned = []
+    if missing:
+        pruned = missing
+        out['groups'] = [g for g in out['groups'] if g in known]
     cfg['autostart'] = out
     _save_config(cfg)
     log_audit(user=_username(), action='power.autostart_saved',
-              details=f"enabled={out['enabled']} groups={out['groups']}")
-    return jsonify({'ok': True, 'autostart': out})
+              details=f"enabled={out['enabled']} groups={out['groups']}"
+                      + (f" pruned={pruned}" if pruned else ''))
+    resp = {'ok': True, 'autostart': out}
+    if pruned:
+        resp['pruned'] = pruned
+    return jsonify(resp)
 
 
 def autostart_run_handler():
